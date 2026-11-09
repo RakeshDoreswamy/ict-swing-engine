@@ -1,0 +1,1052 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//  ICT Swing Engine — TradingView indicator
+//  Rules mirror the Python engine: github.com/RakeshDoreswamy/ict-swing-engine (config.yaml keys
+//  are noted next to each input). No repainting: every object appears only once its rule is
+//  confirmed by CLOSED bars. Education only, not financial advice.
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+indicator("ICT Swing Engine", "ICT Engine", overlay = true, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500, max_bars_back = 5000)
+
+// ───────────────────────────────────────── INPUTS ─────────────────────────────────────────
+string G0 = "General"
+int    atrLen   = input.int(14, "ATR length (simple mean of true range)", minval = 1, group = G0, tooltip = "liquidity.atr_period. Python uses a simple rolling mean of true range, not RMA.")
+string lblSize  = input.string(size.small, "Label size", options = [size.tiny, size.small, size.normal], group = G0)
+
+string G1 = "1-3 · Swing points, institutional swings, open float"
+int    swL      = input.int(1, "Fractal bars left", minval = 1, maxval = 10, group = G1, tooltip = "swings.fractal_left")
+int    swR      = input.int(1, "Fractal bars right (confirmation delay)", minval = 1, maxval = 10, group = G1, tooltip = "swings.fractal_right")
+bool   swStrict = input.bool(true, "Strict: equal neighbours do not count", group = G1, tooltip = "swings.strict")
+bool   showST   = input.bool(true, "Show short-term swings ▲▼", group = G1)
+bool   showLvl  = input.bool(true, "Label ITH / ITL / LTH / LTL", group = G1)
+bool   showOF   = input.bool(true, "Show open float (unbroken ITH/LTH/ITL/LTL)", group = G1)
+bool   ofExtend = input.bool(true, "Extend open float until broken", group = G1)
+string breakOn  = input.string("Wick", "A level is broken by", options = ["Wick", "Close"], group = G1, tooltip = "swings.break_on")
+int    ofMax    = input.int(12, "Max open-float lines per side", minval = 1, maxval = 60, group = G1)
+int    lvlMax   = input.int(60, "Max ITH/LTH labels kept", minval = 5, maxval = 150, group = G1)
+color  cHigh    = input.color(#d1453b, "Highs / buy-side", group = G1, inline = "c1")
+color  cLow     = input.color(#1f9d6b, "Lows / sell-side", group = G1, inline = "c1")
+color  cInt     = input.color(#2357c6, "Intermediate", group = G1, inline = "c2")
+color  cLong    = input.color(#7a4cc2, "Long-term", group = G1, inline = "c2")
+color  cSpent   = input.color(#9aa1ad, "Taken level", group = G1, inline = "c2")
+
+string G2 = "4-5 · Liquidity pools and sweeps"
+bool   showPool = input.bool(true, "Show equal-high / equal-low pools", group = G2)
+float  tolPct   = input.float(0.15, "Equal tolerance: % of price", minval = 0, step = 0.01, group = G2, tooltip = "liquidity.equal_tolerance_pct. Set 0 to use only the ATR tolerance (as in the CNX500 practice images).")
+float  tolAtr   = input.float(0.25, "Equal tolerance: × ATR", minval = 0, step = 0.05, group = G2, tooltip = "liquidity.equal_tolerance_atr. Tolerance = max(% × price, × ATR).")
+int    poolN    = input.int(3, "Show N nearest pools per side", minval = 1, maxval = 10, group = G2)
+bool   poolExt  = input.bool(true, "Extend pools until taken", group = G2)
+bool   showPD   = input.bool(true, "Previous day high/low (intraday)", group = G2)
+bool   showPW   = input.bool(true, "Previous week high/low", group = G2)
+color  cPrev    = input.color(#b7791f, "Previous day/week colour", group = G2)
+bool   showSwp  = input.bool(true, "Show sweeps ◆", group = G2)
+bool   swpMajor = input.bool(true, "Label only sweeps of ITH/ITL/LTH/LTL or pools", group = G2)
+int    swpMax   = input.int(40, "Max sweep labels", minval = 5, maxval = 150, group = G2)
+color  cSwp     = input.color(#0f8b8d, "Sweep colour", group = G2)
+
+string G3 = "6-9 · Displacement, FVG, order blocks, breakers"
+bool   showDisp = input.bool(true, "Highlight displacement candles", group = G3)
+float  dispMult = input.float(1.2, "Displacement: body > × ATR[1]", minval = 0.1, step = 0.1, group = G3, tooltip = "pd_arrays.displacement_atr_mult")
+color  cDisp    = input.color(color.new(#e9b949, 80), "Displacement colour", group = G3)
+bool   showFvg  = input.bool(true, "Show FVGs", group = G3)
+float  fvgMin   = input.float(0.3, "FVG minimum size × ATR", minval = 0, step = 0.05, group = G3, tooltip = "pd_arrays.fvg_min_size_atr (the practice images use 0.3)")
+bool   fvgSess  = input.bool(true, "Intraday: skip 3-candle gaps that span two sessions", group = G3)
+bool   fvgExt   = input.bool(true, "Extend FVG until filled", group = G3)
+bool   showInv  = input.bool(true, "Closed-through FVG becomes an inverse FVG", group = G3)
+int    fvgMax   = input.int(40, "Max FVGs kept", minval = 5, maxval = 150, group = G3)
+color  cBull    = input.color(color.new(#1f9d6b, 82), "Bullish zone", group = G3, inline = "z")
+color  cBear    = input.color(color.new(#d1453b, 82), "Bearish zone", group = G3, inline = "z")
+color  cInv     = input.color(color.new(#7a808a, 82), "Inverse FVG", group = G3, inline = "z")
+bool   showOB   = input.bool(true, "Show order blocks", group = G3)
+int    obLook   = input.int(5, "OB: look back N bars before displacement", minval = 1, maxval = 20, group = G3, tooltip = "pd_arrays.ob_lookback_bars")
+bool   obExt    = input.bool(true, "Extend OB / breaker until closed through", group = G3)
+bool   showBrk  = input.bool(true, "Show breakers", group = G3)
+int    obMax    = input.int(30, "Max OBs kept", minval = 5, maxval = 120, group = G3)
+color  cObBull  = input.color(color.new(#2357c6, 84), "Bullish OB", group = G3, inline = "o")
+color  cObBear  = input.color(color.new(#7a4cc2, 84), "Bearish OB", group = G3, inline = "o")
+
+string G4 = "10-13 · Premium/discount, OTE, IPDA, quarterly shift"
+bool   showRng  = input.bool(true, "Show dealing range: premium / discount / EQ", group = G4)
+string rngSrc   = input.string("ITH/ITL", "Dealing range from", options = ["ITH/ITL", "LTH/LTL"], group = G4)
+bool   showOTE  = input.bool(true, "Show OTE band", group = G4)
+float  oteLo    = input.float(0.62, "OTE from", minval = 0, maxval = 1, step = 0.01, group = G4, tooltip = "premium_discount.ote_low")
+float  oteHi    = input.float(0.79, "OTE to", minval = 0, maxval = 1, step = 0.01, group = G4, tooltip = "premium_discount.ote_high")
+float  oteSw    = input.float(0.705, "OTE sweet spot", minval = 0, maxval = 1, step = 0.005, group = G4, tooltip = "premium_discount.ote_sweet")
+color  cPrem    = input.color(color.new(#d1453b, 92), "Premium", group = G4, inline = "p")
+color  cDisc    = input.color(color.new(#1f9d6b, 92), "Discount", group = G4, inline = "p")
+color  cOTE     = input.color(color.new(#b7791f, 78), "OTE", group = G4, inline = "p")
+bool   showIpda = input.bool(true, "Show IPDA ranges (completed daily bars)", group = G4)
+int    ip1      = input.int(20, "IPDA 1", minval = 2, group = G4, inline = "ip", tooltip = "ipda.lookbacks")
+int    ip2      = input.int(40, "2", minval = 2, group = G4, inline = "ip")
+int    ip3      = input.int(60, "3", minval = 2, group = G4, inline = "ip")
+color  cIpda    = input.color(#0f8b8d, "IPDA colour", group = G4)
+bool   showQS   = input.bool(true, "Mark quarterly shifts (daily)", group = G4)
+int    qsLen    = input.int(60, "Quarterly shift: prior N daily bars", minval = 5, group = G4, tooltip = "ipda.quarterly_shift_range")
+
+string G5 = "14-15 · Market structure shift and setup engine"
+bool   showMss  = input.bool(true, "Show market structure shifts", group = G5)
+float  mssMult  = input.float(1.0, "MSS: body > × ATR[1]", minval = 0.1, step = 0.1, group = G5, tooltip = "confirmation.mss_displacement_atr_mult")
+int    mssMax   = input.int(40, "Max MSS drawings", minval = 5, maxval = 150, group = G5)
+color  cMss     = input.color(#2357c6, "MSS colour", group = G5)
+bool   showSet  = input.bool(true, "Run and draw setup engine", group = G5)
+bool   aOnly    = input.bool(false, "Draw grade A setups only", group = G5)
+int    swpLook  = input.int(15, "Sweep within N bars before the MSS", minval = 1, group = G5)
+int    limExp   = input.int(10, "Limit order expiry (bars)", minval = 1, group = G5, tooltip = "entry.limit_expiry_bars")
+float  stopBuf  = input.float(0.25, "Stop buffer × ATR", minval = 0, step = 0.05, group = G5, tooltip = "entry.stop_buffer_atr")
+float  minStop  = input.float(0.5, "Minimum stop distance × ATR", minval = 0, step = 0.05, group = G5, tooltip = "entry.min_stop_atr")
+float  minRR    = input.float(1.5, "Minimum R:R", minval = 0.1, step = 0.1, group = G5, tooltip = "entry.min_rr")
+float  beAt     = input.float(1.0, "Stop to breakeven at +R", minval = 0.1, step = 0.1, group = G5, tooltip = "management.breakeven_at_r")
+int    timeStop = input.int(100, "Time stop: bars after fill", minval = 1, group = G5, tooltip = "The CNX500 practice run used time_stop_bars (25) × 4 = 100 bars on 15m.")
+int    setMax   = input.int(15, "Max setups drawn", minval = 1, maxval = 50, group = G5)
+
+string G6 = "16 · Bias and dashboard"
+string htf      = input.timeframe("D", "Bias timeframe", group = G6)
+bool   showDash = input.bool(true, "Show dashboard", group = G6)
+string dashPos  = input.string(position.top_right, "Dashboard position", options = [position.top_right, position.bottom_right, position.top_left, position.bottom_left], group = G6)
+
+// ───────────────────────────────────────── TYPES ──────────────────────────────────────────
+// A confirmed swing point. level: 1 = short-term, 2 = intermediate, 3 = long-term.
+type Swing
+    int   bar
+    float price
+    bool  isHigh
+    int   level     = 1
+    bool  broken    = false   // traded through (wick or close, per input)
+    int   brokenBar = na
+    bool  dropped   = false   // fell out of the tracking window
+    bool  mssUsed   = false   // already used as an MSS trigger
+    line  ln
+    label lb                  // ITH/LTH label
+    label tl                  // "open ITH 19,432" text
+
+// A price zone. kind: 0 FVG, 1 inverse FVG, 2 order block, 3 breaker.
+type Zone
+    int   left
+    float top
+    float bottom
+    bool  bull
+    int   kind
+    int   midBar
+    bool  active   = true
+    bool  ceTagged = false
+    box   bx
+    line  mid
+    label tx
+
+// Equal highs / equal lows cluster.
+type Pool
+    float price
+    bool  isHigh
+    int   touches
+    int   left
+    line  ln
+    label lb
+
+// Sweep → MSS → FVG setup, simulated bar by bar.
+type Setup
+    bool   bull
+    int    sweepBar
+    float  sweepExt
+    int    mssBar
+    int    fvgMid    = na
+    float  fvgTop    = na
+    float  fvgBot    = na
+    float  entry     = na
+    float  stop      = na
+    float  risk      = na
+    float  target    = na
+    float  rr        = na
+    int    start     = na
+    int    fillBar   = na
+    int    exitBar   = na
+    float  exitPx    = na
+    bool   beMoved   = false
+    float  curStop   = na
+    string result    = "pending"
+    float  R         = na
+    bool   inDisc    = false
+    string grade     = ""
+    bool   done      = false
+    int    lastBar   = na
+    array<line>  lns
+    array<label> lbs
+
+// ───────────────────────────────────────── STATE ──────────────────────────────────────────
+var array<Swing> hiAll  = array.new<Swing>()   // every confirmed swing high (all levels)
+var array<Swing> loAll  = array.new<Swing>()
+var array<Swing> hiInt  = array.new<Swing>()   // ITH sequence (includes LTH)
+var array<Swing> loInt  = array.new<Swing>()
+var array<Swing> hiLong = array.new<Swing>()   // LTH sequence
+var array<Swing> loLong = array.new<Swing>()
+var array<Swing> liqH   = array.new<Swing>()   // not yet traded through by a wick (sweep candidates)
+var array<Swing> liqL   = array.new<Swing>()
+var array<Swing> unbH   = array.new<Swing>()   // not yet broken (break-on rule)
+var array<Swing> unbL   = array.new<Swing>()
+var array<Swing> ofH    = array.new<Swing>()   // open-float lines being drawn
+var array<Swing> ofL    = array.new<Swing>()
+var array<line>  spentL = array.new<line>()
+var array<label> spentX = array.new<label>()
+var array<label> lvlLbs = array.new<label>()
+var array<label> swpLbs = array.new<label>()
+var array<line>  mssLns = array.new<line>()
+var array<label> mssLbs = array.new<label>()
+var array<label> qsLbs  = array.new<label>()
+var array<Zone>  fvgA   = array.new<Zone>()
+var array<Zone>  obA    = array.new<Zone>()
+var array<Pool>  poolH  = array.new<Pool>()
+var array<Pool>  poolL  = array.new<Pool>()
+var array<Setup> pend   = array.new<Setup>()   // MSS waiting for its FVG
+var array<Setup> live   = array.new<Setup>()   // setups being simulated
+var array<Setup> drawn  = array.new<Setup>()   // finished setups with drawings
+var array<float> stats  = array.from(0.0, 0.0, 0.0, 0.0, 0.0)   // setups, traded, wins, sumR, gradeA
+var array<Setup> lastSet = array.new<Setup>()
+
+const int KEEP = 500                            // swings tracked per side
+
+// ───────────────────────────────────── BASIC SERIES ───────────────────────────────────────
+// ATR = simple mean of true range (matches Python ict_engine.detectors.basic.atr).
+float atrS  = ta.sma(ta.tr(true), atrLen)
+float atr1  = nz(atrS[1], nz(atrS, high - low))
+float body  = math.abs(close - open)
+// 6 · Displacement: |close − open| > dispMult × ATR of the PRIOR bars.
+int dispDir = body > dispMult * atr1 ? (close > open ? 1 : -1) : 0
+
+// ───────────────────────────────────── HELPERS ────────────────────────────────────────────
+f_fmt(float p) => str.tostring(p, "#,##0.##")
+f_name(bool hi, int lvl) => hi ? (lvl == 3 ? "LTH" : lvl == 2 ? "ITH" : "STH") : (lvl == 3 ? "LTL" : lvl == 2 ? "ITL" : "STL")
+f_lvlCol(int lvl, bool hi) => lvl == 3 ? cLong : lvl == 2 ? cInt : (hi ? cHigh : cLow)
+// "a beats b": higher for highs, lower for lows (strict unless the strict toggle is off).
+f_beats(float a, float b, bool hi) => hi ? (swStrict ? a > b : a >= b) : (swStrict ? a < b : a <= b)
+
+f_trimLabels(array<label> a, int mx) =>
+    while a.size() > mx
+        label.delete(a.shift())
+
+f_trimLines(array<line> a, int mx) =>
+    while a.size() > mx
+        line.delete(a.shift())
+
+// 1 · Fractal test for the bar swR bars ago: beats swL bars on its left and swR bars on its right.
+f_isFractal(bool hi) =>
+    float p = hi ? high[swR] : low[swR]
+    bool ok = bar_index >= swL + swR and not na(p)
+    if ok
+        for k = 1 to swL
+            if not f_beats(p, hi ? high[swR + k] : low[swR + k], hi)
+                ok := false
+        for k = 1 to swR
+            if not f_beats(p, hi ? high[swR - k] : low[swR - k], hi)
+                ok := false
+    ok
+
+// 2 · Promotion: the middle of the last three items beats both neighbours → next level.
+f_promote(array<Swing> seq, bool hi) =>
+    Swing out = na
+    int n = seq.size()
+    if n >= 3
+        Swing a = seq.get(n - 3)
+        Swing b = seq.get(n - 2)
+        Swing c = seq.get(n - 1)
+        if f_beats(b.price, a.price, hi) and f_beats(b.price, c.price, hi)
+            out := b
+    out
+
+f_levelLabel(Swing s) =>
+    if showLvl
+        string t = f_name(s.isHigh, s.level)
+        color col = f_lvlCol(s.level, s.isHigh)
+        if na(s.lb)
+            s.lb := label.new(s.bar, s.price, t, xloc.bar_index, yloc.price, color.new(color.white, 100), s.isHigh ? label.style_label_down : label.style_label_up, col, lblSize)
+            lvlLbs.push(s.lb)
+            f_trimLabels(lvlLbs, lvlMax)
+        else
+            s.lb.set_text(t)
+            s.lb.set_textcolor(col)
+
+// 3 · Open float: dashed line from an unbroken ITH/LTH (ITL/LTL) to the current bar.
+f_openFloat(Swing s) =>
+    if showOF and not s.broken
+        color col = s.isHigh ? cHigh : cLow
+        string t = "open " + f_name(s.isHigh, s.level) + " " + f_fmt(s.price)
+        if na(s.ln)
+            s.ln := line.new(s.bar, s.price, bar_index, s.price, xloc.bar_index, extend.none, col, line.style_dashed, 1)
+            s.tl := label.new(bar_index, s.price, t, xloc.bar_index, yloc.price, color.new(color.white, 100), label.style_label_left, col, size.tiny)
+            array<Swing> arr = s.isHigh ? ofH : ofL
+            arr.push(s)
+            while arr.size() > ofMax
+                Swing o = arr.shift()
+                line.delete(o.ln)
+                label.delete(o.tl)
+        else
+            s.tl.set_text(t)
+
+// 4 · Pools: a new swing joins an untouched pool within tolerance, or forms one with other
+// untouched swings within tolerance (2+ members). Pool price = the extreme of its members.
+f_poolAdd(Swing s) =>
+    float tol = math.max(tolPct / 100 * s.price, tolAtr * nz(atrS, high - low))
+    array<Pool> pa = s.isHigh ? poolH : poolL
+    bool joined = false
+    if pa.size() > 0
+        for p in pa
+            if not joined and math.abs(p.price - s.price) <= tol
+                p.touches += 1
+                p.price := s.isHigh ? math.max(p.price, s.price) : math.min(p.price, s.price)
+                p.ln.set_y1(p.price)
+                p.ln.set_y2(p.price)
+                p.lb.set_y(p.price)
+                p.lb.set_text((s.isHigh ? "BSL pool ×" : "SSL pool ×") + str.tostring(p.touches) + " " + f_fmt(p.price))
+                joined := true
+    if not joined
+        array<Swing> lq = s.isHigh ? liqH : liqL
+        int cnt = 1
+        float ext = s.price
+        int left = s.bar
+        if lq.size() > 0
+            for q in lq
+                if q.bar != s.bar and math.abs(q.price - s.price) <= tol
+                    cnt += 1
+                    ext := s.isHigh ? math.max(ext, q.price) : math.min(ext, q.price)
+                    left := math.min(left, q.bar)
+        if cnt >= 2 and showPool
+            color col = s.isHigh ? cHigh : cLow
+            line ln = line.new(left, ext, bar_index, ext, xloc.bar_index, extend.none, col, line.style_dashed, 2)
+            label lb = label.new(bar_index, ext, (s.isHigh ? "BSL pool ×" : "SSL pool ×") + str.tostring(cnt) + " " + f_fmt(ext), xloc.bar_index, yloc.price, color.new(color.white, 100), label.style_label_left, col, size.tiny)
+            pa.push(Pool.new(ext, s.isHigh, cnt, left, ln, lb))
+            while pa.size() > 30
+                Pool o = pa.shift()
+                line.delete(o.ln)
+                label.delete(o.lb)
+
+// Push to a capped swing list; anything pushed out is marked dropped.
+f_pushCap(array<Swing> a, Swing s) =>
+    a.push(s)
+    while a.size() > KEEP
+        Swing o = a.shift()
+        o.dropped := true
+
+f_newZone(int left, float top, float bot, bool bull, int kind, int midBar, bool show) =>
+    Zone z = Zone.new(left, top, bot, bull, kind, midBar)
+    if show
+        color bg = kind == 0 ? (bull ? cBull : cBear) : (bull ? cObBull : cObBear)
+        z.bx  := box.new(left, top, bar_index, bot, color.new(bg, 40), 1, line.style_solid, extend.none, xloc.bar_index, bg)
+        z.mid := line.new(left, (top + bot) / 2, bar_index, (top + bot) / 2, xloc.bar_index, extend.none, color.new(bg, 20), line.style_dotted, 1)
+        string t = kind == 0 ? (bull ? "bull FVG" : "bear FVG") : (bull ? "bull OB" : "bear OB")
+        z.tx  := label.new(left, top, t, xloc.bar_index, yloc.price, color.new(color.white, 100), label.style_label_lower_left, color.new(bg, 0), size.tiny)
+    z
+
+f_dropZone(Zone z) =>
+    box.delete(z.bx)
+    line.delete(z.mid)
+    label.delete(z.tx)
+
+// 15 · Target = nearest swing on the other side that is confirmed before `idx`, not broken
+// before `idx`, beyond the entry and giving R:R ≥ minRR.
+f_target(Setup s, int idx) =>
+    array<Swing> src = s.bull ? hiAll : loAll
+    float best = na
+    if src.size() > 0
+        for q in src
+            bool known = q.bar + swR <= idx - 1 and not q.dropped
+            bool alive = na(q.brokenBar) or q.brokenBar >= idx
+            bool beyond = s.bull ? q.price > s.entry : q.price < s.entry
+            if known and alive and beyond and math.abs(q.price - s.entry) / s.risk >= minRR
+                if na(best) or (s.bull ? q.price < best : q.price > best)
+                    best := q.price
+    best
+
+f_grade(Setup s) =>
+    int n = 3 + (s.inDisc ? 1 : 0) + (na(s.rr) ? 0 : 1) + (na(s.fillBar) ? 0 : 1)
+    n == 6 ? "A" : n >= 5 ? "B" : "C"
+
+// One bar of the setup simulation. Returns an event code for alerts.
+f_step(Setup s, int idx, float h, float l, float c) =>
+    string ev = ""
+    if not s.done
+        if na(s.fillBar)
+            if idx >= s.start and idx < s.start + limExp
+                if (s.bull and l <= s.entry) or (not s.bull and h >= s.entry)
+                    s.fillBar := idx
+                    s.target  := f_target(s, idx)
+                    s.rr      := na(s.target) ? na : math.abs(s.target - s.entry) / s.risk
+                    s.curStop := s.stop
+                    if na(s.target)
+                        s.result := "skipped: R:R < " + str.tostring(minRR)
+                        s.done   := true
+                        ev := "skip"
+                    else
+                        s.result := "open"
+                        ev := "fill"
+            if na(s.fillBar) and not s.done and idx >= s.start + limExp - 1
+                float t0 = f_target(s, s.start)
+                s.rr     := na(t0) ? na : math.abs(t0 - s.entry) / s.risk
+                s.result := "no fill"
+                s.done   := true
+                ev := "nofill"
+        if not na(s.fillBar) and not s.done
+            bool hitStop = s.bull ? l <= s.curStop : h >= s.curStop
+            bool hitTgt  = s.bull ? h >= s.target : l <= s.target
+            if hitStop
+                s.exitBar := idx
+                s.exitPx  := s.curStop
+                s.result  := s.beMoved ? "breakeven" : "stop"
+                s.done    := true
+                ev := s.beMoved ? "be" : "stop"
+            else if hitTgt
+                s.exitBar := idx
+                s.exitPx  := s.target
+                s.result  := "target"
+                s.done    := true
+                ev := "target"
+            else
+                float oneR = s.bull ? s.entry + beAt * s.risk : s.entry - beAt * s.risk
+                if not s.beMoved and (s.bull ? h >= oneR : l <= oneR)
+                    s.beMoved := true
+                    s.curStop := s.entry
+                if idx >= s.fillBar + timeStop - 1
+                    s.exitBar := idx
+                    s.exitPx  := c
+                    s.result  := "time stop"
+                    s.done    := true
+                    ev := "time"
+        if s.done
+            if not na(s.exitPx)
+                s.R := (s.bull ? s.exitPx - s.entry : s.entry - s.exitPx) / s.risk
+            s.grade := f_grade(s)
+    ev
+
+f_clearDraw(Setup s) =>
+    if s.lns.size() > 0
+        for x in s.lns
+            line.delete(x)
+    if s.lbs.size() > 0
+        for x in s.lbs
+            label.delete(x)
+    s.lns.clear()
+    s.lbs.clear()
+
+f_lab(Setup s, int x, float y, string t, color col, bool up) =>
+    s.lbs.push(label.new(x, y, t, xloc.bar_index, yloc.price, color.new(color.white, 100), up ? label.style_label_up : label.style_label_down, col, size.tiny))
+
+f_ln(Setup s, int x1, int x2, float y, color col, string st, int w) =>
+    s.lns.push(line.new(x1, y, x2, y, xloc.bar_index, extend.none, col, st, w))
+
+// 15 · Draw ① sweep ② MSS ③ FVG ④ entry ⑤ stop ⑥ target, +1R line and the result.
+f_drawSetup(Setup s) =>
+    f_clearDraw(s)
+    string g = s.done ? s.grade : f_grade(s)
+    if showSet and (not aOnly or g == "A")
+        int x0 = na(s.fillBar) ? s.start : s.fillBar
+        int x1 = s.done ? (na(s.exitBar) ? s.start + limExp : s.exitBar) : bar_index
+        x1 := math.max(x1, x0 + 3)
+        f_lab(s, s.sweepBar, s.sweepExt, "① sweep", cSwp, s.bull)
+        f_lab(s, s.mssBar, s.bull ? s.fvgTop : s.fvgBot, "② MSS", cMss, not s.bull)
+        f_lab(s, s.fvgMid, s.bull ? s.fvgBot : s.fvgTop, "③ FVG", s.bull ? cLow : cHigh, s.bull)
+        f_ln(s, x0, x1, s.entry, cInt, line.style_solid, 2)
+        f_ln(s, x0, x1, s.stop, cHigh, line.style_solid, 2)
+        f_lab(s, x1, s.entry, "④ entry " + f_fmt(s.entry), cInt, true)
+        f_lab(s, x1, s.stop, "⑤ stop " + f_fmt(s.stop), cHigh, not s.bull)
+        if not na(s.target)
+            f_ln(s, x0, x1, s.target, cLow, line.style_solid, 2)
+            f_lab(s, x1, s.target, "⑥ target " + f_fmt(s.target) + "  R:R " + str.tostring(s.rr, "#.##"), cLow, s.bull)
+            float oneR = s.bull ? s.entry + beAt * s.risk : s.entry - beAt * s.risk
+            f_ln(s, x0, x1, oneR, cLong, line.style_dotted, 1)
+        string res = s.result + (na(s.R) ? "" : " " + str.tostring(s.R, "+#.##;-#.##") + "R") + " · grade " + g
+        color rc = na(s.R) ? cSpent : s.R > 0 ? cLow : s.R < 0 ? cHigh : cSpent
+        f_lab(s, x1, s.bull ? math.max(s.entry, nz(s.target, s.entry)) : math.min(s.entry, nz(s.target, s.entry)), res, rc, not s.bull)
+
+// ─────────────────────────────── HIGHER-TIMEFRAME DATA ────────────────────────────────────
+// Non-repainting idiom: [1] of the HTF series with lookahead_on = the last COMPLETED HTF bar.
+[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+[pwh, pwl] = request.security(syminfo.tickerid, "W", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+[ih1, il1, ih2, il2, ih3, il3] = request.security(syminfo.tickerid, "D", [ta.highest(high, ip1)[1], ta.lowest(low, ip1)[1], ta.highest(high, ip2)[1], ta.lowest(low, ip2)[1], ta.highest(high, ip3)[1], ta.lowest(low, ip3)[1]], lookahead = barmerge.lookahead_on)
+
+// 13 · Quarterly shift: close through the prior N-bar range opposite to the last shift.
+f_qs() =>
+    float hi = ta.highest(high, qsLen)[1]
+    float lo = ta.lowest(low, qsLen)[1]
+    var int lastDir = 0
+    int d = close > hi ? 1 : close < lo ? -1 : 0
+    int sh = 0
+    if d != 0 and d != lastDir
+        sh := d
+        lastDir := d
+    [sh, lastDir]
+f_qsPrev() =>
+    [sh, ld] = f_qs()
+    [sh[1], ld[1]]
+[qsLocal, qsLocalDir] = f_qs()
+[qsHtf, qsHtfDir] = request.security(syminfo.tickerid, "D", f_qsPrev(), lookahead = barmerge.lookahead_on)
+
+// 16 · HTF bias: ITH/ITL from 3-bar fractals on the bias timeframe; up if the last two ITHs
+// AND ITLs rise, down if both fall, else range.
+f_bias() =>
+    var float h1 = na
+    var float h2 = na
+    var float l1 = na
+    var float l2 = na
+    var float i1 = na
+    var float i2 = na
+    var float j1 = na
+    var float j2 = na
+    if high[1] > high[2] and high[1] > high
+        if not na(h2) and h1 > h2 and h1 > high[1]
+            i2 := i1
+            i1 := h1
+        h2 := h1
+        h1 := high[1]
+    if low[1] < low[2] and low[1] < low
+        if not na(l2) and l1 < l2 and l1 < low[1]
+            j2 := j1
+            j1 := l1
+        l2 := l1
+        l1 := low[1]
+    int b = na(i2) or na(j2) ? 0 : (i1 > i2 and j1 > j2 ? 1 : i1 < i2 and j1 < j2 ? -1 : 0)
+    [b, i1, j1]
+f_biasPrev() =>
+    [b, i1, j1] = f_bias()
+    [b[1], i1[1], j1[1]]
+[hBias, hRngHi, hRngLo] = request.security(syminfo.tickerid, htf, f_biasPrev(), lookahead = barmerge.lookahead_on)
+
+// ───────────────────────────────── PER-BAR ENGINE ─────────────────────────────────────────
+bool aNewITH = false
+bool aNewITL = false
+bool aBslSwp = false
+bool aSslSwp = false
+bool aMssUp  = false
+bool aMssDn  = false
+bool aSetupA = false
+bool aFill   = false
+bool aTarget = false
+bool aStop   = false
+bool aBE     = false
+bool aOTE    = false
+bool aCE     = false
+string msg   = ""
+
+var int   lastSslBar = na
+var float lastSslExt = na
+var int   lastBslBar = na
+var float lastBslExt = na
+var int   lastMssBar = na
+var int   lastMssDir = 0
+var float lastMssLvl = na
+var int   lastBullOb = na
+var int   lastBearOb = na
+
+// ── 14 · MSS (uses swings confirmed on earlier bars only) ──
+// Bullish: close > most recent confirmed STH, body > mssMult × ATR[1], last two swing lows falling.
+if hiAll.size() > 0 and loAll.size() >= 2
+    Swing h = hiAll.last()
+    if not h.mssUsed and close > h.price and body > mssMult * atr1 and loAll.get(loAll.size() - 1).price < loAll.get(loAll.size() - 2).price
+        h.mssUsed := true
+        aMssUp := true
+        lastMssBar := bar_index
+        lastMssDir := 1
+        lastMssLvl := h.price
+        if showMss
+            mssLns.push(line.new(h.bar, h.price, bar_index, h.price, xloc.bar_index, extend.none, cMss, line.style_solid, 2))
+            mssLbs.push(label.new(bar_index, high, "MSS ↑", xloc.bar_index, yloc.price, color.new(color.white, 100), label.style_label_down, cMss, lblSize))
+        if not na(lastSslBar) and lastSslBar < bar_index and lastSslBar >= bar_index - swpLook
+            pend.push(Setup.new(true, lastSslBar, lastSslExt, bar_index, lns = array.new<line>(), lbs = array.new<label>()))
+// Bearish: close < most recent confirmed STL, body > mssMult × ATR[1], last two swing highs rising.
+if loAll.size() > 0 and hiAll.size() >= 2
+    Swing l0 = loAll.last()
+    if not l0.mssUsed and close < l0.price and body > mssMult * atr1 and hiAll.get(hiAll.size() - 1).price > hiAll.get(hiAll.size() - 2).price
+        l0.mssUsed := true
+        aMssDn := true
+        lastMssBar := bar_index
+        lastMssDir := -1
+        lastMssLvl := l0.price
+        if showMss
+            mssLns.push(line.new(l0.bar, l0.price, bar_index, l0.price, xloc.bar_index, extend.none, cMss, line.style_solid, 2))
+            mssLbs.push(label.new(bar_index, low, "MSS ↓", xloc.bar_index, yloc.price, color.new(color.white, 100), label.style_label_up, cMss, lblSize))
+        if not na(lastBslBar) and lastBslBar < bar_index and lastBslBar >= bar_index - swpLook
+            pend.push(Setup.new(false, lastBslBar, lastBslExt, bar_index, lns = array.new<line>(), lbs = array.new<label>()))
+f_trimLines(mssLns, mssMax)
+f_trimLabels(mssLbs, mssMax)
+
+// ── 5 · Sweeps: wick beyond a confirmed, untaken swing AND close back inside it ──
+int   swpHiLvl = 0
+int   swpLoLvl = 0
+bool  poolSwH  = false
+bool  poolSwL  = false
+if liqH.size() > 0
+    for i = liqH.size() - 1 to 0
+        Swing s = liqH.get(i)
+        if high > s.price
+            liqH.remove(i)
+            if close < s.price and bar_index > s.bar + 1
+                aBslSwp := true
+                swpHiLvl := math.max(swpHiLvl, s.level)
+if liqL.size() > 0
+    for i = liqL.size() - 1 to 0
+        Swing s = liqL.get(i)
+        if low < s.price
+            liqL.remove(i)
+            if close > s.price and bar_index > s.bar + 1
+                aSslSwp := true
+                swpLoLvl := math.max(swpLoLvl, s.level)
+// 4 · Pools are taken by a wick through them (removed: only untouched pools are shown).
+if poolH.size() > 0
+    for i = poolH.size() - 1 to 0
+        Pool p = poolH.get(i)
+        if high > p.price
+            poolSwH := poolSwH or close < p.price
+            line.delete(p.ln)
+            label.delete(p.lb)
+            poolH.remove(i)
+        else if poolExt
+            p.ln.set_x2(bar_index)
+            p.lb.set_x(bar_index)
+if poolL.size() > 0
+    for i = poolL.size() - 1 to 0
+        Pool p = poolL.get(i)
+        if low < p.price
+            poolSwL := poolSwL or close > p.price
+            line.delete(p.ln)
+            label.delete(p.lb)
+            poolL.remove(i)
+        else if poolExt
+            p.ln.set_x2(bar_index)
+            p.lb.set_x(bar_index)
+if aBslSwp
+    lastBslBar := bar_index
+    lastBslExt := high
+    if showSwp and (not swpMajor or swpHiLvl >= 2 or poolSwH)
+        swpLbs.push(label.new(bar_index, high, "◆ BSL sweep", xloc.bar_index, yloc.price, color.new(color.white, 100), label.style_label_down, cSwp, size.tiny))
+if aSslSwp
+    lastSslBar := bar_index
+    lastSslExt := low
+    if showSwp and (not swpMajor or swpLoLvl >= 2 or poolSwL)
+        swpLbs.push(label.new(bar_index, low, "◆ SSL sweep", xloc.bar_index, yloc.price, color.new(color.white, 100), label.style_label_up, cSwp, size.tiny))
+f_trimLabels(swpLbs, swpMax)
+
+// ── 3 · Breaks (open float): first later bar whose high/close trades through the level ──
+float brkH = breakOn == "Wick" ? high : close
+float brkL = breakOn == "Wick" ? low : close
+if unbH.size() > 0
+    for i = unbH.size() - 1 to 0
+        Swing s = unbH.get(i)
+        if brkH > s.price
+            s.broken := true
+            s.brokenBar := bar_index
+            unbH.remove(i)
+            if not na(s.ln)
+                s.ln.set_x2(bar_index)
+                s.ln.set_color(cSpent)
+                s.ln.set_style(line.style_dotted)
+                label.delete(s.tl)
+                spentL.push(s.ln)
+                spentX.push(label.new(bar_index, s.price, "", xloc.bar_index, yloc.price, cSpent, label.style_xcross, cSpent, size.tiny))
+                int k = ofH.indexof(s)
+                if k >= 0
+                    ofH.remove(k)
+if unbL.size() > 0
+    for i = unbL.size() - 1 to 0
+        Swing s = unbL.get(i)
+        if brkL < s.price
+            s.broken := true
+            s.brokenBar := bar_index
+            unbL.remove(i)
+            if not na(s.ln)
+                s.ln.set_x2(bar_index)
+                s.ln.set_color(cSpent)
+                s.ln.set_style(line.style_dotted)
+                label.delete(s.tl)
+                spentL.push(s.ln)
+                spentX.push(label.new(bar_index, s.price, "", xloc.bar_index, yloc.price, cSpent, label.style_xcross, cSpent, size.tiny))
+                int k = ofL.indexof(s)
+                if k >= 0
+                    ofL.remove(k)
+f_trimLines(spentL, ofMax * 2)
+f_trimLabels(spentX, ofMax * 2)
+if ofExtend
+    if ofH.size() > 0
+        for s in ofH
+            s.ln.set_x2(bar_index)
+            s.tl.set_x(bar_index)
+    if ofL.size() > 0
+        for s in ofL
+            s.ln.set_x2(bar_index)
+            s.tl.set_x(bar_index)
+
+// ── 7 · FVGs: update existing (fill / inverse / CE tag), then detect the one confirmed now ──
+if fvgA.size() > 0
+    for z in fvgA
+        if z.active
+            if z.kind == 0
+                bool closedThrough = z.bull ? close < z.bottom : close > z.top
+                bool filled = z.bull ? low <= z.bottom : high >= z.top
+                if not z.ceTagged and (z.bull ? low <= (z.top + z.bottom) / 2 : high >= (z.top + z.bottom) / 2)
+                    z.ceTagged := true
+                    aCE := true
+                if closedThrough and showInv
+                    z.kind := 1
+                    z.bx.set_bgcolor(cInv)
+                    z.bx.set_border_color(color.new(cInv, 40))
+                    z.tx.set_text(z.bull ? "inverse FVG (now resistance)" : "inverse FVG (now support)")
+                    z.bx.set_right(bar_index)
+                else if filled
+                    z.active := false
+                    z.bx.set_right(bar_index)
+                    z.mid.set_x2(bar_index)
+                else if fvgExt
+                    z.bx.set_right(bar_index)
+                    z.mid.set_x2(bar_index)
+            else
+                // inverse FVG works from the other side until price closes back through it
+                if z.bull ? close > z.top : close < z.bottom
+                    z.active := false
+                else if fvgExt
+                    z.bx.set_right(bar_index)
+                    z.mid.set_x2(bar_index)
+bool sessOK = not (fvgSess and timeframe.isintraday) or (dayofmonth[2] == dayofmonth and month[2] == month)
+// Bullish FVG (middle bar = 1 bar ago): low[0] > high[2]; zone [high[2], low[0]].
+if bar_index >= 2 and sessOK and low > high[2] and (low - high[2]) >= fvgMin * nz(atrS[1])
+    fvgA.push(f_newZone(bar_index - 2, low, high[2], true, 0, bar_index - 1, showFvg))
+// Bearish FVG: high[0] < low[2]; zone [high[0], low[2]].
+if bar_index >= 2 and sessOK and high < low[2] and (low[2] - high) >= fvgMin * nz(atrS[1])
+    fvgA.push(f_newZone(bar_index - 2, low[2], high, false, 0, bar_index - 1, showFvg))
+while fvgA.size() > fvgMax
+    f_dropZone(fvgA.shift())
+
+// ── 8-9 · Order blocks and breakers ──
+if obA.size() > 0
+    for z in obA
+        if z.active
+            if z.kind == 2
+                // OB fails when a bar CLOSES beyond its far side → becomes a breaker
+                if z.bull ? close < z.bottom : close > z.top
+                    if showBrk
+                        z.kind := 3
+                        color nb = z.bull ? cBear : cBull
+                        z.bx.set_bgcolor(nb)
+                        z.bx.set_border_color(color.new(nb, 40))
+                        z.tx.set_text(z.bull ? "bearish breaker" : "bullish breaker")
+                        z.bx.set_right(bar_index)
+                    else
+                        z.active := false
+                        z.bx.set_right(bar_index)
+                else if obExt
+                    z.bx.set_right(bar_index)
+                    z.mid.set_x2(bar_index)
+            else
+                // breaker ends when price closes back through it
+                if z.bull ? close > z.top : close < z.bottom
+                    z.active := false
+                else if obExt
+                    z.bx.set_right(bar_index)
+                    z.mid.set_x2(bar_index)
+// Bullish OB: the last down-close candle within obLook bars before a bullish displacement candle.
+if dispDir != 0
+    bool wantDown = dispDir > 0
+    for k = 1 to obLook
+        if bar_index - k < 0
+            break
+        bool opp = wantDown ? close[k] < open[k] : close[k] > open[k]
+        if opp
+            int obBar = bar_index - k
+            if wantDown and obBar != lastBullOb
+                lastBullOb := obBar
+                obA.push(f_newZone(obBar, high[k], low[k], true, 2, obBar, showOB))
+            else if not wantDown and obBar != lastBearOb
+                lastBearOb := obBar
+                obA.push(f_newZone(obBar, high[k], low[k], false, 2, obBar, showOB))
+            break
+while obA.size() > obMax
+    f_dropZone(obA.shift())
+
+// ── 15 · Setup engine: MSS waiting for its FVG (middle bar from MSS−2 to MSS+1) ──
+if pend.size() > 0
+    for i = pend.size() - 1 to 0
+        Setup s = pend.get(i)
+        if bar_index >= s.mssBar + 2 or barstate.islast
+            Zone g = na
+            if fvgA.size() > 0
+                for z in fvgA
+                    if z.bull == s.bull and z.midBar >= s.mssBar - 2 and z.midBar <= s.mssBar + 1
+                        if na(g) or z.midBar > g.midBar
+                            g := z
+            if not na(g) and bar_index >= s.mssBar + 2
+                float a = nz(atrS[bar_index - s.mssBar])
+                s.fvgMid := g.midBar
+                s.fvgTop := g.top
+                s.fvgBot := g.bottom
+                s.entry  := (g.top + g.bottom) / 2
+                if s.bull
+                    s.stop := math.min(math.min(s.sweepExt, g.bottom) - stopBuf * a, s.entry - minStop * a)
+                else
+                    s.stop := math.max(math.max(s.sweepExt, g.top) + stopBuf * a, s.entry + minStop * a)
+                s.risk  := math.abs(s.entry - s.stop)
+                s.start := g.midBar + 2
+                // discount/premium vs the dealing range of intermediate swings at the MSS
+                Swing rh = na
+                Swing rl = na
+                if hiInt.size() > 0
+                    for q in hiInt
+                        if q.bar <= s.mssBar - 2
+                            rh := q
+                if loInt.size() > 0
+                    for q in loInt
+                        if q.bar <= s.mssBar - 2
+                            rl := q
+                if not na(rh) and not na(rl)
+                    float eq = (rh.price + rl.price) / 2
+                    s.inDisc := s.bull ? s.entry < eq : s.entry > eq
+                stats.set(0, stats.get(0) + 1)
+                // replay bars from the order start up to now (history only, no lookahead)
+                if s.start <= bar_index
+                    for k = bar_index - s.start to 0
+                        string ev = f_step(s, bar_index - k, high[k], low[k], close[k])
+                        if k == 0 and ev == "fill"
+                            aFill := true
+                s.lastBar := bar_index
+                live.push(s)
+                lastSet.push(s)
+                if lastSet.size() > 1
+                    lastSet.shift()
+            if bar_index >= s.mssBar + 2
+                pend.remove(i)
+
+if live.size() > 0
+    for s in live
+        if not s.done and s.lastBar < bar_index
+            string ev = f_step(s, bar_index, high, low, close)
+            s.lastBar := bar_index
+            aFill   := aFill or ev == "fill"
+            aTarget := aTarget or ev == "target"
+            aStop   := aStop or ev == "stop"
+            aBE     := aBE or ev == "be"
+            if ev == "fill" and f_grade(s) == "A"
+                aSetupA := true
+                msg := "ICT grade A " + (s.bull ? "LONG" : "SHORT") + " filled · entry " + f_fmt(s.entry) + " · stop " + f_fmt(s.stop) + " · target " + f_fmt(s.target)
+    for i = live.size() - 1 to 0
+        Setup s = live.get(i)
+        if s.done
+            if not na(s.R)
+                stats.set(1, stats.get(1) + 1)
+                stats.set(2, stats.get(2) + (s.R > 0 ? 1 : 0))
+                stats.set(3, stats.get(3) + s.R)
+                stats.set(4, stats.get(4) + (s.grade == "A" ? 1 : 0))
+            f_drawSetup(s)
+            drawn.push(s)
+            live.remove(i)
+while drawn.size() > setMax
+    f_clearDraw(drawn.shift())
+
+// ── 1-2 · Swing confirmation (last, so nothing above can use a swing on its own bar) ──
+bool isSTH = f_isFractal(true)
+bool isSTL = f_isFractal(false)
+if isSTH
+    Swing s = Swing.new(bar_index - swR, high[swR], true)
+    f_poolAdd(s)
+    f_pushCap(hiAll, s)
+    f_pushCap(liqH, s)
+    f_pushCap(unbH, s)
+    Swing p2 = f_promote(hiAll, true)
+    if not na(p2)
+        p2.level := math.max(p2.level, 2)
+        hiInt.push(p2)
+        aNewITH := true
+        f_levelLabel(p2)
+        f_openFloat(p2)
+        Swing p3 = f_promote(hiInt, true)
+        if not na(p3)
+            p3.level := 3
+            hiLong.push(p3)
+            f_levelLabel(p3)
+            f_openFloat(p3)
+    while hiInt.size() > KEEP
+        hiInt.shift()
+    while hiLong.size() > KEEP
+        hiLong.shift()
+if isSTL
+    Swing s = Swing.new(bar_index - swR, low[swR], false)
+    f_poolAdd(s)
+    f_pushCap(loAll, s)
+    f_pushCap(liqL, s)
+    f_pushCap(unbL, s)
+    Swing p2 = f_promote(loAll, false)
+    if not na(p2)
+        p2.level := math.max(p2.level, 2)
+        loInt.push(p2)
+        aNewITL := true
+        f_levelLabel(p2)
+        f_openFloat(p2)
+        Swing p3 = f_promote(loInt, false)
+        if not na(p3)
+            p3.level := 3
+            loLong.push(p3)
+            f_levelLabel(p3)
+            f_openFloat(p3)
+    while loInt.size() > KEEP
+        loInt.shift()
+    while loLong.size() > KEEP
+        loLong.shift()
+
+plotshape(showST and isSTH, "STH", shape.triangledown, location.abovebar, cHigh, offset = -swR, size = size.tiny)
+plotshape(showST and isSTL, "STL", shape.triangleup, location.belowbar, cLow, offset = -swR, size = size.tiny)
+bgcolor(showDisp and dispDir != 0 ? cDisp : na, title = "Displacement")
+
+// ── 4 · Previous day / week high and low (completed bars) ──
+// (a gap at each new day/week keeps the steps from being joined by vertical lines)
+bool pdhNew = ta.change(pdh) != 0
+bool pdlNew = ta.change(pdl) != 0
+bool pwhNew = ta.change(pwh) != 0
+bool pwlNew = ta.change(pwl) != 0
+plot(showPD and timeframe.isintraday and not pdhNew ? pdh : na, "Prev day high", cPrev, 1, plot.style_linebr)
+plot(showPD and timeframe.isintraday and not pdlNew ? pdl : na, "Prev day low", cPrev, 1, plot.style_linebr)
+plot(showPW and not pwhNew ? pwh : na, "Prev week high", color.new(cPrev, 30), 2, plot.style_linebr)
+plot(showPW and not pwlNew ? pwl : na, "Prev week low", color.new(cPrev, 30), 2, plot.style_linebr)
+
+// ── 13 · Quarterly shift labels ──
+bool newDay = ta.change(time("D")) != 0
+int qsNow = timeframe.isdaily ? qsLocal : (timeframe.isintraday and newDay ? qsHtf : 0)
+if showQS and qsNow != 0
+    qsLbs.push(label.new(bar_index, qsNow > 0 ? low : high, qsNow > 0 ? "shift up" : "shift down", xloc.bar_index, yloc.price, color.new(cLong, 15), qsNow > 0 ? label.style_label_up : label.style_label_down, color.white, size.small))
+    f_trimLabels(qsLbs, 12)
+
+// ── 10-11 · Dealing range, premium/discount, OTE (redrawn on the last bar) ──
+array<Swing> rH = rngSrc == "ITH/ITL" ? hiInt : hiLong
+array<Swing> rL = rngSrc == "ITH/ITL" ? loInt : loLong
+Swing rngH = rH.size() > 0 ? rH.last() : na
+Swing rngL = rL.size() > 0 ? rL.last() : na
+float rHi  = na(rngH) ? na : rngH.price
+float rLo  = na(rngL) ? na : rngL.price
+float rEq  = (rHi + rLo) / 2
+bool  upLeg = not na(rngH) and not na(rngL) and rngL.bar < rngH.bar
+float oA = upLeg ? rHi - oteLo * (rHi - rLo) : rLo + oteLo * (rHi - rLo)
+float oB = upLeg ? rHi - oteHi * (rHi - rLo) : rLo + oteHi * (rHi - rLo)
+float oS = upLeg ? rHi - oteSw * (rHi - rLo) : rLo + oteSw * (rHi - rLo)
+bool inOTE = not na(oA) and low <= math.max(oA, oB) and high >= math.min(oA, oB)
+aOTE := inOTE and not inOTE[1]
+
+var box  bPrem = na
+var box  bDisc = na
+var box  bOte  = na
+var line lEq   = na
+var line lOte  = na
+var label tEq  = na
+var label tOte = na
+var array<line>  ipLns = array.new<line>()
+var array<label> ipLbs = array.new<label>()
+
+if barstate.islast
+    box.delete(bPrem)
+    box.delete(bDisc)
+    box.delete(bOte)
+    line.delete(lEq)
+    line.delete(lOte)
+    label.delete(tEq)
+    label.delete(tOte)
+    if showRng and not na(rHi) and not na(rLo)
+        int x0 = math.min(rngH.bar, rngL.bar)
+        bPrem := box.new(x0, rHi, bar_index + 8, rEq, color.new(cPrem, 100), 0, line.style_solid, extend.none, xloc.bar_index, cPrem, "PREMIUM · sell zone", size.small, color.new(cHigh, 20), text.align_right, text.align_top)
+        bDisc := box.new(x0, rEq, bar_index + 8, rLo, color.new(cDisc, 100), 0, line.style_solid, extend.none, xloc.bar_index, cDisc, "DISCOUNT · buy zone", size.small, color.new(cLow, 20), text.align_right, text.align_bottom)
+        lEq   := line.new(x0, rEq, bar_index + 8, rEq, xloc.bar_index, extend.none, cInt, line.style_solid, 2)
+        tEq   := label.new(bar_index + 8, rEq, "EQ " + f_fmt(rEq), xloc.bar_index, yloc.price, color.new(color.white, 100), label.style_label_left, cInt, size.small)
+        if showOTE
+            int xo = math.max(rngH.bar, rngL.bar)
+            bOte := box.new(xo, math.max(oA, oB), bar_index + 8, math.min(oA, oB), color.new(cOTE, 40), 1, line.style_solid, extend.none, xloc.bar_index, cOTE)
+            lOte := line.new(xo, oS, bar_index + 8, oS, xloc.bar_index, extend.none, color.new(cOTE, 0), line.style_dotted, 1)
+            tOte := label.new(bar_index + 8, oS, "OTE " + f_fmt(math.min(oA, oB)) + "–" + f_fmt(math.max(oA, oB)) + " · 70.5% " + f_fmt(oS), xloc.bar_index, yloc.price, color.new(color.white, 100), label.style_label_left, color.new(cOTE, 0), size.small)
+    // 12 · IPDA ranges from completed daily bars
+    for x in ipLns
+        line.delete(x)
+    for x in ipLbs
+        label.delete(x)
+    ipLns.clear()
+    ipLbs.clear()
+    if showIpda
+        array<float> vals = array.from(ih1, il1, ih2, il2, ih3, il3)
+        array<string> names = array.from("IPDA " + str.tostring(ip1) + "d high", "IPDA " + str.tostring(ip1) + "d low", "IPDA " + str.tostring(ip2) + "d high", "IPDA " + str.tostring(ip2) + "d low", "IPDA " + str.tostring(ip3) + "d high", "IPDA " + str.tostring(ip3) + "d low")
+        for j = 0 to 5
+            float v = vals.get(j)
+            if not na(v)
+                ipLns.push(line.new(bar_index - 20, v, bar_index + 20, v, xloc.bar_index, extend.none, color.new(cIpda, 20), line.style_solid, 1))
+                ipLbs.push(label.new(bar_index + 20, v, names.get(j) + " " + f_fmt(v), xloc.bar_index, yloc.price, color.new(color.white, 100), label.style_label_left, cIpda, size.tiny))
+    // 4 · show only the N nearest untouched pools per side
+    if poolH.size() > 0
+        for p in poolH
+            int rank = 0
+            for q in poolH
+                rank += q.price < p.price ? 1 : 0
+            p.ln.set_color(rank < poolN ? cHigh : color.new(cHigh, 100))
+            p.lb.set_textcolor(rank < poolN ? cHigh : color.new(cHigh, 100))
+    if poolL.size() > 0
+        for p in poolL
+            int rank = 0
+            for q in poolL
+                rank += q.price > p.price ? 1 : 0
+            p.ln.set_color(rank < poolN ? cLow : color.new(cLow, 100))
+            p.lb.set_textcolor(rank < poolN ? cLow : color.new(cLow, 100))
+    // draw setups still running
+    if live.size() > 0
+        for s in live
+            f_drawSetup(s)
+
+// ─────────────────────────────────────── DASHBOARD ────────────────────────────────────────
+var table dash = table.new(dashPos, 2, 12, color.new(#fbfaf7, 5), color.new(#c9c6bf, 0), 1, color.new(#e4e1da, 0), 1)
+f_row(int r, string k, string v, color vc) =>
+    dash.cell(0, r, k, text_color = #5f6672, text_size = size.small, text_halign = text.align_left)
+    dash.cell(1, r, v, text_color = vc, text_size = size.small, text_halign = text.align_left)
+
+if barstate.islast and showDash
+    float px = close
+    float bsl = na
+    float ssl = na
+    if unbH.size() > 0
+        for q in unbH
+            if q.level >= 2 and q.price > px and (na(bsl) or q.price < bsl)
+                bsl := q.price
+    if unbL.size() > 0
+        for q in unbL
+            if q.level >= 2 and q.price < px and (na(ssl) or q.price > ssl)
+                ssl := q.price
+    int nF = 0
+    for z in fvgA
+        nF += z.active ? 1 : 0
+    int nO = 0
+    for z in obA
+        nO += z.active ? 1 : 0
+    float hEq = (hRngHi + hRngLo) / 2
+    string biasTxt = hBias > 0 ? "UP" : hBias < 0 ? "DOWN" : "RANGE"
+    f_row(0, "ICT Swing Engine", syminfo.ticker + " · " + timeframe.period, #1d1f23)
+    f_row(1, "Bias (" + htf + ")", biasTxt, hBias > 0 ? cLow : hBias < 0 ? cHigh : #5f6672)
+    f_row(2, "HTF range · EQ", na(hEq) ? "n/a" : f_fmt(hRngLo) + " – " + f_fmt(hRngHi) + " · EQ " + f_fmt(hEq), #1d1f23)
+    f_row(3, "Price vs HTF range", na(hEq) ? "n/a" : px > hEq ? "PREMIUM (sell zone)" : "DISCOUNT (buy zone)", na(hEq) ? #5f6672 : px > hEq ? cHigh : cLow)
+    f_row(4, "Nearest BSL above / SSL below", (na(bsl) ? "—" : f_fmt(bsl)) + " / " + (na(ssl) ? "—" : f_fmt(ssl)), #1d1f23)
+    f_row(5, "Chart range · EQ", na(rEq) ? "n/a" : f_fmt(rLo) + " – " + f_fmt(rHi) + " · EQ " + f_fmt(rEq), #1d1f23)
+    f_row(6, "Open FVGs · active OBs", str.tostring(nF) + " · " + str.tostring(nO), #1d1f23)
+    f_row(7, "Last MSS", na(lastMssBar) ? "—" : (lastMssDir > 0 ? "↑ " : "↓ ") + f_fmt(lastMssLvl) + " · " + str.tostring(bar_index - lastMssBar) + " bars ago", lastMssDir > 0 ? cLow : cHigh)
+    string ls = "—"
+    if lastSet.size() > 0
+        Setup s = lastSet.last()
+        ls := (s.bull ? "LONG " : "SHORT ") + f_fmt(s.entry) + " / " + f_fmt(s.stop) + " / " + (na(s.target) ? "—" : f_fmt(s.target)) + " · " + s.result + " · " + (s.done ? s.grade : f_grade(s))
+    f_row(8, "Last setup (entry/stop/target)", ls, #1d1f23)
+    float nT = stats.get(1)
+    f_row(9, "Setups · traded · win %", str.tostring(stats.get(0), "#") + " · " + str.tostring(nT, "#") + " · " + (nT > 0 ? str.tostring(100 * stats.get(2) / nT, "#") + "%" : "—"), #1d1f23)
+    f_row(10, "Avg R · total R", nT > 0 ? str.tostring(stats.get(3) / nT, "+#.##;-#.##") + "R · " + str.tostring(stats.get(3), "+#.#;-#.#") + "R" : "—", nT > 0 and stats.get(3) > 0 ? cLow : cHigh)
+    f_row(11, "Note", "Education only, not financial advice", #5f6672)
+
+// ───────────────────────────────────────── ALERTS ─────────────────────────────────────────
+alertcondition(aNewITH, "New ITH", "ICT Engine: new intermediate-term high confirmed")
+alertcondition(aNewITL, "New ITL", "ICT Engine: new intermediate-term low confirmed")
+alertcondition(aBslSwp, "BSL sweep", "ICT Engine: buy-side liquidity swept (wick above, close back below)")
+alertcondition(aSslSwp, "SSL sweep", "ICT Engine: sell-side liquidity swept (wick below, close back above)")
+alertcondition(aMssUp, "Bullish MSS", "ICT Engine: bullish market structure shift (close above last STH)")
+alertcondition(aMssDn, "Bearish MSS", "ICT Engine: bearish market structure shift (close below last STL)")
+alertcondition(aSetupA, "Grade A setup filled", "ICT Engine: grade A setup filled")
+alertcondition(aFill, "Entry filled", "ICT Engine: setup limit entry filled")
+alertcondition(aTarget, "Target hit", "ICT Engine: setup target hit")
+alertcondition(aStop, "Stop hit", "ICT Engine: setup stopped out")
+alertcondition(aBE, "Breakeven exit", "ICT Engine: setup exited at breakeven")
+alertcondition(aOTE, "Price entered OTE", "ICT Engine: price entered the OTE band of the dealing range")
+alertcondition(aCE, "FVG CE tagged", "ICT Engine: price tagged the CE of an open FVG")
+
+if barstate.isconfirmed
+    if aSetupA
+        alert(msg, alert.freq_once_per_bar_close)
+    if aMssUp or aMssDn
+        alert("ICT " + syminfo.ticker + ": " + (aMssUp ? "bullish" : "bearish") + " MSS at " + f_fmt(lastMssLvl), alert.freq_once_per_bar_close)
+    if aTarget or aStop or aBE
+        alert("ICT " + syminfo.ticker + ": setup " + (aTarget ? "TARGET" : aStop ? "STOP" : "BREAKEVEN") + " hit", alert.freq_once_per_bar_close)
