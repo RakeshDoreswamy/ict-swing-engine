@@ -35,6 +35,17 @@ data/raw/                   OHLCV CSVs (one file per symbol)
 data/events/events.csv      earnings / RBI / Budget / rebalancing calendar
 ```
 
+## Learn the concepts
+* **Study guide:** [`docs/CONCEPTS.md`](docs/CONCEPTS.md) covers all 24 concepts: the idea, the exact rule, why it matters, and an exercise.
+* **Walkthroughs on real charts:**
+  ```bash
+  python -m scripts.learn                                # list concepts
+  python -m scripts.learn swings                         # last 30 NIFTY daily bars, step by step
+  python -m scripts.learn swings --bars 120 --tf weekly  # bigger picture
+  ```
+  Each walkthrough prints why every bar qualifies, when it was confirmed, and the open liquidity
+  above and below price, then saves an annotated chart in `reports/learn_<concept>.png`.
+
 ## Quick start
 ```bash
 pip install -r requirements.txt
