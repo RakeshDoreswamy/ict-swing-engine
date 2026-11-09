@@ -34,6 +34,7 @@ bool   showPool = input.bool(true, "Show equal-high / equal-low pools", group = 
 float  tolPct   = input.float(0.15, "Equal tolerance: % of price", minval = 0, step = 0.01, group = G2, tooltip = "liquidity.equal_tolerance_pct. Set 0 to use only the ATR tolerance (as in the CNX500 practice images).")
 float  tolAtr   = input.float(0.25, "Equal tolerance: × ATR", minval = 0, step = 0.05, group = G2, tooltip = "liquidity.equal_tolerance_atr. Tolerance = max(% × price, × ATR).")
 int    poolN    = input.int(3, "Show N nearest pools per side", minval = 1, maxval = 10, group = G2)
+int    poolLook = input.int(300, "Pools: use swings from the last N bars", minval = 20, maxval = 5000, group = G2, tooltip = "Equal highs/lows are only grouped among swings this recent (the practice images grouped swings inside the visible window).")
 bool   poolExt  = input.bool(true, "Extend pools until taken", group = G2)
 bool   showPD   = input.bool(true, "Previous day high/low (intraday)", group = G2)
 bool   showPW   = input.bool(true, "Previous week high/low", group = G2)
@@ -212,6 +213,8 @@ int dispDir = body > dispMult * atr1 ? (close > open ? 1 : -1) : 0
 
 // ───────────────────────────────────── HELPERS ────────────────────────────────────────────
 f_fmt(float p) => str.tostring(p, "#,##0.##")
+// Pine cannot draw more than 10,000 bars back by bar index: clamp any x in the past.
+f_x(int x) => math.max(x, bar_index - 9990)
 f_name(bool hi, int lvl) => hi ? (lvl == 3 ? "LTH" : lvl == 2 ? "ITH" : "STH") : (lvl == 3 ? "LTL" : lvl == 2 ? "ITL" : "STL")
 f_lvlCol(int lvl, bool hi) => lvl == 3 ? cLong : lvl == 2 ? cInt : (hi ? cHigh : cLow)
 // "a beats b": higher for highs, lower for lows (strict unless the strict toggle is off).
@@ -255,7 +258,7 @@ f_levelLabel(Swing s) =>
         string t = f_name(s.isHigh, s.level)
         color col = f_lvlCol(s.level, s.isHigh)
         if na(s.lb)
-            s.lb := label.new(s.bar, s.price, t, xloc.bar_index, yloc.price, color.new(color.white, 100), s.isHigh ? label.style_label_down : label.style_label_up, col, lblSize)
+            s.lb := label.new(f_x(s.bar), s.price, t, xloc.bar_index, yloc.price, color.new(color.white, 100), s.isHigh ? label.style_label_down : label.style_label_up, col, lblSize)
             lvlLbs.push(s.lb)
             f_trimLabels(lvlLbs, lvlMax)
         else
@@ -268,7 +271,7 @@ f_openFloat(Swing s) =>
         color col = s.isHigh ? cHigh : cLow
         string t = "open " + f_name(s.isHigh, s.level) + " " + f_fmt(s.price)
         if na(s.ln)
-            s.ln := line.new(s.bar, s.price, bar_index, s.price, xloc.bar_index, extend.none, col, line.style_dashed, 1)
+            s.ln := line.new(f_x(s.bar), s.price, bar_index, s.price, xloc.bar_index, extend.none, col, line.style_dashed, 1)
             s.tl := label.new(bar_index, s.price, t, xloc.bar_index, yloc.price, color.new(color.white, 100), label.style_label_left, col, size.tiny)
             array<Swing> arr = s.isHigh ? ofH : ofL
             arr.push(s)
@@ -302,15 +305,15 @@ f_poolAdd(Swing s) =>
         int left = s.bar
         if lq.size() > 0
             for q in lq
-                if q.bar != s.bar and math.abs(q.price - s.price) <= tol
+                if q.bar != s.bar and q.bar >= bar_index - poolLook and math.abs(q.price - s.price) <= tol
                     cnt += 1
                     ext := s.isHigh ? math.max(ext, q.price) : math.min(ext, q.price)
                     left := math.min(left, q.bar)
         if cnt >= 2 and showPool
             color col = s.isHigh ? cHigh : cLow
-            line ln = line.new(left, ext, bar_index, ext, xloc.bar_index, extend.none, col, line.style_dashed, 2)
+            line ln = line.new(f_x(left), ext, bar_index, ext, xloc.bar_index, extend.none, col, line.style_dashed, 2)
             label lb = label.new(bar_index, ext, (s.isHigh ? "BSL pool ×" : "SSL pool ×") + str.tostring(cnt) + " " + f_fmt(ext), xloc.bar_index, yloc.price, color.new(color.white, 100), label.style_label_left, col, size.tiny)
-            pa.push(Pool.new(ext, s.isHigh, cnt, left, ln, lb))
+            pa.push(Pool.new(ext, s.isHigh, cnt, f_x(left), ln, lb))
             while pa.size() > 30
                 Pool o = pa.shift()
                 line.delete(o.ln)
@@ -327,10 +330,10 @@ f_newZone(int left, float top, float bot, bool bull, int kind, int midBar, bool 
     Zone z = Zone.new(left, top, bot, bull, kind, midBar)
     if show
         color bg = kind == 0 ? (bull ? cBull : cBear) : (bull ? cObBull : cObBear)
-        z.bx  := box.new(left, top, bar_index, bot, color.new(bg, 40), 1, line.style_solid, extend.none, xloc.bar_index, bg)
-        z.mid := line.new(left, (top + bot) / 2, bar_index, (top + bot) / 2, xloc.bar_index, extend.none, color.new(bg, 20), line.style_dotted, 1)
+        z.bx  := box.new(f_x(left), top, bar_index, bot, color.new(bg, 40), 1, line.style_solid, extend.none, xloc.bar_index, bg)
+        z.mid := line.new(f_x(left), (top + bot) / 2, bar_index, (top + bot) / 2, xloc.bar_index, extend.none, color.new(bg, 20), line.style_dotted, 1)
         string t = kind == 0 ? (bull ? "bull FVG" : "bear FVG") : (bull ? "bull OB" : "bear OB")
-        z.tx  := label.new(left, top, t, xloc.bar_index, yloc.price, color.new(color.white, 100), label.style_label_lower_left, color.new(bg, 0), size.tiny)
+        z.tx  := label.new(f_x(left), top, t, xloc.bar_index, yloc.price, color.new(color.white, 100), label.style_label_lower_left, color.new(bg, 0), size.tiny)
     z
 
 f_dropZone(Zone z) =>
@@ -424,10 +427,10 @@ f_clearDraw(Setup s) =>
     s.lbs.clear()
 
 f_lab(Setup s, int x, float y, string t, color col, bool up) =>
-    s.lbs.push(label.new(x, y, t, xloc.bar_index, yloc.price, color.new(color.white, 100), up ? label.style_label_up : label.style_label_down, col, size.tiny))
+    s.lbs.push(label.new(f_x(x), y, t, xloc.bar_index, yloc.price, color.new(color.white, 100), up ? label.style_label_up : label.style_label_down, col, size.tiny))
 
 f_ln(Setup s, int x1, int x2, float y, color col, string st, int w) =>
-    s.lns.push(line.new(x1, y, x2, y, xloc.bar_index, extend.none, col, st, w))
+    s.lns.push(line.new(f_x(x1), y, f_x(x2), y, xloc.bar_index, extend.none, col, st, w))
 
 // 15 · Draw ① sweep ② MSS ③ FVG ④ entry ⑤ stop ⑥ target, +1R line and the result.
 f_drawSetup(Setup s) =>
@@ -543,7 +546,7 @@ if hiAll.size() > 0 and loAll.size() >= 2
         lastMssDir := 1
         lastMssLvl := h.price
         if showMss
-            mssLns.push(line.new(h.bar, h.price, bar_index, h.price, xloc.bar_index, extend.none, cMss, line.style_solid, 2))
+            mssLns.push(line.new(f_x(h.bar), h.price, bar_index, h.price, xloc.bar_index, extend.none, cMss, line.style_solid, 2))
             mssLbs.push(label.new(bar_index, high, "MSS ↑", xloc.bar_index, yloc.price, color.new(color.white, 100), label.style_label_down, cMss, lblSize))
         if not na(lastSslBar) and lastSslBar < bar_index and lastSslBar >= bar_index - swpLook
             pend.push(Setup.new(true, lastSslBar, lastSslExt, bar_index, lns = array.new<line>(), lbs = array.new<label>()))
@@ -557,7 +560,7 @@ if loAll.size() > 0 and hiAll.size() >= 2
         lastMssDir := -1
         lastMssLvl := l0.price
         if showMss
-            mssLns.push(line.new(l0.bar, l0.price, bar_index, l0.price, xloc.bar_index, extend.none, cMss, line.style_solid, 2))
+            mssLns.push(line.new(f_x(l0.bar), l0.price, bar_index, l0.price, xloc.bar_index, extend.none, cMss, line.style_solid, 2))
             mssLbs.push(label.new(bar_index, low, "MSS ↓", xloc.bar_index, yloc.price, color.new(color.white, 100), label.style_label_up, cMss, lblSize))
         if not na(lastBslBar) and lastBslBar < bar_index and lastBslBar >= bar_index - swpLook
             pend.push(Setup.new(false, lastBslBar, lastBslExt, bar_index, lns = array.new<line>(), lbs = array.new<label>()))
@@ -939,13 +942,13 @@ if barstate.islast
     label.delete(tEq)
     label.delete(tOte)
     if showRng and not na(rHi) and not na(rLo)
-        int x0 = math.min(rngH.bar, rngL.bar)
+        int x0 = f_x(math.min(rngH.bar, rngL.bar))
         bPrem := box.new(x0, rHi, bar_index + 8, rEq, color.new(cPrem, 100), 0, line.style_solid, extend.none, xloc.bar_index, cPrem, "PREMIUM · sell zone", size.small, color.new(cHigh, 20), text.align_right, text.align_top)
         bDisc := box.new(x0, rEq, bar_index + 8, rLo, color.new(cDisc, 100), 0, line.style_solid, extend.none, xloc.bar_index, cDisc, "DISCOUNT · buy zone", size.small, color.new(cLow, 20), text.align_right, text.align_bottom)
         lEq   := line.new(x0, rEq, bar_index + 8, rEq, xloc.bar_index, extend.none, cInt, line.style_solid, 2)
         tEq   := label.new(bar_index + 8, rEq, "EQ " + f_fmt(rEq), xloc.bar_index, yloc.price, color.new(color.white, 100), label.style_label_left, cInt, size.small)
         if showOTE
-            int xo = math.max(rngH.bar, rngL.bar)
+            int xo = f_x(math.max(rngH.bar, rngL.bar))
             bOte := box.new(xo, math.max(oA, oB), bar_index + 8, math.min(oA, oB), color.new(cOTE, 40), 1, line.style_solid, extend.none, xloc.bar_index, cOTE)
             lOte := line.new(xo, oS, bar_index + 8, oS, xloc.bar_index, extend.none, color.new(cOTE, 0), line.style_dotted, 1)
             tOte := label.new(bar_index + 8, oS, "OTE " + f_fmt(math.min(oA, oB)) + "–" + f_fmt(math.max(oA, oB)) + " · 70.5% " + f_fmt(oS), xloc.bar_index, yloc.price, color.new(color.white, 100), label.style_label_left, color.new(cOTE, 0), size.small)
