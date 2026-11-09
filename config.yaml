@@ -75,6 +75,7 @@ entry:
   model: limit                   # limit | stop | both
   limit_expiry_bars: 10
   stop_buffer_atr: 0.25
+  min_stop_atr: 0.5               # never risk less than 0.5 x ATR
   min_rr: 1.5
 
 # ---- Module 9: risk ----

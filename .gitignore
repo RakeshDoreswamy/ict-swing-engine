@@ -4,3 +4,4 @@ __pycache__/
 .venv/
 # generated outputs
 reports/
+.DS_Store

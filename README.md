@@ -35,6 +35,17 @@ data/raw/                   OHLCV CSVs (one file per symbol)
 data/events/events.csv      earnings / RBI / Budget / rebalancing calendar
 ```
 
+## Concept website (25 pages)
+`docs/` is a static site, one page per concept. Each page has the idea, the exact rule, a schematic,
+a **real NIFTY 15-minute or daily example found by the engine**, common mistakes and an exercise.
+
+```bash
+open docs/index.html                 # view locally
+python -m scripts.build_site         # rebuild after updating data/raw/NIFTY.csv or NIFTY_15m.csv
+```
+Publish: GitHub → Settings → Pages → Branch `main`, folder `/docs`, then visit
+https://rakeshdoreswamy.github.io/ict-swing-engine/
+
 ## Learn the concepts
 * **Study guide:** [`docs/CONCEPTS.md`](docs/CONCEPTS.md) covers all 24 concepts: the idea, the exact rule, why it matters, and an exercise.
 * **Walkthroughs on real charts:**
