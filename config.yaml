@@ -1,0 +1,119 @@
+# ICT Swing Engine - every threshold lives here. No magic numbers in code.
+
+universe:
+  index: NIFTY
+  etf: NIFTYBEES
+  stocks: [RELIANCE, HDFCBANK, ICICIBANK, INFY, TCS, LT, ITC, SBIN, BHARTIARTL, AXISBANK]
+  sectors:            # used by portfolio caps (module 9)
+    RELIANCE: energy
+    HDFCBANK: banks
+    ICICIBANK: banks
+    SBIN: banks
+    AXISBANK: banks
+    INFY: it
+    TCS: it
+    LT: capital_goods
+    ITC: fmcg
+    BHARTIARTL: telecom
+
+data:
+  source: csv              # csv | yfinance | nse_tool
+  csv_dir: data/raw
+  yfinance_suffix: ".NS"
+  start: "2015-01-01"
+  weekly_rule: "W-FRI"     # weekly bars end on Friday
+
+# ---- Module 1: swing points ----
+swings:
+  fractal_left: 1          # bars to the left that must be strictly lower (highs) / higher (lows)
+  fractal_right: 1         # bars to the right; a swing is only confirmed after these close
+  strict: true             # true: strictly greater/less; false: allow equal neighbours
+  break_on: wick           # wick | close - what counts as "traded through" an old swing
+
+# ---- Module 2: open float & liquidity pools ----
+liquidity:
+  equal_tolerance_pct: 0.15      # highs within 0.15% count as "equal"
+  equal_tolerance_atr: 0.10      # ...or within 0.10 * ATR (whichever is larger)
+  atr_period: 14
+  min_touches_for_pool: 2
+  sweep_requires_close_back_inside: true
+  rank_weights: {distance: 0.4, level: 0.35, touches: 0.25}
+
+# ---- Module 3: PD arrays ----
+pd_arrays:
+  displacement_atr_mult: 1.2     # body > 1.2 * ATR = displacement
+  fvg_min_size_atr: 0.10
+  ob_lookback_bars: 5            # search back this far for the last opposite candle
+  zone_max_age_bars: 120
+
+# ---- Module 4: premium / discount ----
+premium_discount:
+  equilibrium: 0.5
+  ote_low: 0.62
+  ote_high: 0.79
+  ote_sweet: 0.705
+
+# ---- Module 5: IPDA ----
+ipda:
+  lookbacks: [20, 40, 60]
+  quarterly_shift_range: 60
+
+# ---- Module 6: bias & optional filters ----
+bias:
+  use_intermarket: false
+  use_yields: false
+  use_seasonality: false         # only switch on if module 13 seasonality study shows an edge
+  seasonality_min_tstat: 2.0
+
+# ---- Module 7: confirmation ----
+confirmation:
+  mss_displacement_atr_mult: 1.0
+  sweep_lookback_bars: 10
+
+# ---- Module 8: entries ----
+entry:
+  model: limit                   # limit | stop | both
+  limit_expiry_bars: 10
+  stop_buffer_atr: 0.25
+  min_rr: 1.5
+
+# ---- Module 9: risk ----
+risk:
+  capital: 1000000               # Rs 10,00,000
+  risk_per_trade_pct: 1.0
+  reduced_risk_pct: 0.5
+  reduce_after_consecutive_losses: 3
+  reduce_after_drawdown_pct: 8.0
+  gap_slippage_factor: 1.25      # size as if the stop fills 25% worse
+  max_open_trades: 5
+  max_per_sector: 2
+  max_correlation: 0.8
+
+# ---- Module 10: trade management ----
+management:
+  breakeven_at_r: 1.0
+  partial_exit_pct: 50
+  time_stop_bars: 25
+
+# ---- Module 11: filters ----
+filters:
+  event_calendar: data/events/events.csv
+  min_avg_turnover_cr: 50        # Rs crore / day, 20-day average
+  gap_risk_avg_gap_pct: 1.0
+
+# ---- Module 13: backtest costs (delivery) ----
+costs:
+  brokerage_pct: 0.0
+  stt_pct: 0.1                   # both sides on delivery
+  exchange_txn_pct: 0.00297
+  sebi_fee_pct: 0.0001
+  stamp_duty_buy_pct: 0.015
+  gst_pct_on_charges: 18
+  slippage_pct: 0.05
+
+# ---- Module 14: journal ----
+journal:
+  path: reports/journal.csv
+  graduation_min_trades: 30
+  graduation_min_avg_r: 0.0
+  starting_live_size_pct: 25
