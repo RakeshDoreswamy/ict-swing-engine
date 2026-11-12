@@ -132,51 +132,163 @@ Check every chart in TradingView with the ICT Swing Engine indicator before acti
     return counts
 
 
+def funnel_info(res_base, res, wl, market_ok, seconds, wide) -> dict:
+    s1 = res_base["stage1"]
+    top1 = s1[~s1["pass"]].reason.value_counts().head(3)
+    s2 = res_base["stage2"]
+    top2 = (s2[~s2["pass"]].reason.str.replace(r"[\d.]+ ATR away", "N ATR away", regex=True)
+            .str.replace(r"relative strength \d+ pct.*", "weak relative strength", regex=True).value_counts().head(3)) if len(s2) else pd.Series(dtype=int)
+    counts = {k: int((wl.bucket == k).sum()) for k, _, _ in BUCKETS} if len(wl) else {}
+    return {"as_of": res["as_of"], "market_ok": market_ok, "market_sentence": res["market"]["sentence"],
+            "universe": res["steps"][0][1] if res["steps"] else 0, "s1_pass": int(s1["pass"].sum()),
+            "s1_top": "; ".join(f"{k} ({v})" for k, v in top1.items()),
+            "s2_base": int(s2["pass"].sum()) if len(s2) else 0,
+            "s2_top": "dropped: " + "; ".join(f"{k} ({v})" for k, v in top2.items()) if len(top2) else "",
+            "s2_wide": int(res["stage2"]["pass"].sum()) if wide and len(res["stage2"]) else None,
+            "setups": int(sum(counts.values())), "near_miss": int((wl.bucket == "near_miss").sum()) if len(wl) else 0,
+            "counts": counts, "seconds": seconds}
+
+
+def walkforward_lines() -> list[str]:
+    import json
+    runs = sorted((ROOT / "reports" / "walkforward").glob("*/summary.json"))
+    if not runs:
+        return ["No walk-forward run yet."]
+    s = json.loads(runs[-1].read_text())
+    rs = s["rule_sets"]
+    out = [f"Walk-forward {s['test_start']} → {s['test_end']} ({s['timeframe']} candles as a 45m proxy, after Indian delivery costs):"]
+    for k, label in (("base", "all base-rule setups"), ("a_like_only", "A-like setups only"),
+                     ("a_like_no_zone", "A-like without the zone filter"), ("no_market_filter", "ignoring the market filter")):
+        m = rs.get(k)
+        if m and m.get("trades"):
+            out.append(f"{label}: {m['trades']} trades, win {m['win_rate_pct']} %, average {m['avg_R']:+.2f}R, "
+                       f"profit factor {m['profit_factor']}")
+    out.append("Small samples: none of this is proven edge yet. Paper trade and log results in R before using real money.")
+    return out
+
+
 def main():
+    import time
+
+    from ict_engine.backtest.walkforward import cost_pct
+    from ict_engine.notify import daily_email, mailer
+    from ict_engine.scan.reasons import scrutinise
+    from ict_engine.sim import timemachine as TM
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--fetch", action="store_true", help="update daily bars and indices first (needs internet)")
     ap.add_argument("--no-fetch-intraday", action="store_true")
     ap.add_argument("--date")
-    ap.add_argument("--wide", action="store_true")
+    ap.add_argument("--mode", choices=["base", "wide", "both"], default="both",
+                    help="base = tested rules only; wide = relaxed daily filters; both = wide list, base names flagged")
+    ap.add_argument("--wide", action="store_true", help="same as --mode wide")
     ap.add_argument("--no-timemachine", action="store_true")
+    ap.add_argument("--detail", type=int, default=6, help="buy candidates that get charts + a full Time Machine")
+    ap.add_argument("--email", action="store_true", help="send the email (settings in .env)")
+    ap.add_argument("--email-preview", action="store_true", help="write email.html without sending")
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
     a = ap.parse_args()
+    mode = "wide" if a.wide else a.mode
+    t0 = time.time()
     if a.fetch:
         subprocess.run([sys.executable, "-m", "scripts.fetch_data", "--daily", "--indices"], cwd=ROOT, check=False)
     cfg = load_config()
-    if a.wide:
-        c2 = cfg["scan"]["stage2"]
+    quiet = lambda *x: None  # noqa: E731
+    res_base = run_scan(copy.deepcopy(cfg), a.date, fetch_intraday=not a.no_fetch_intraday, workers=a.workers,
+                        watch=True, log=quiet)
+    res = res_base
+    if mode in ("wide", "both"):
+        cw = copy.deepcopy(cfg)
+        c2 = cw["scan"]["stage2"]
         c2["require_discount"], c2["zone_proximity_atr"], c2["rs_min_pct"] = False, 1e9, 0
-    res = run_scan(copy.deepcopy(cfg), a.date, fetch_intraday=not a.no_fetch_intraday, workers=a.workers,
-                   watch=True, log=lambda *x: None)
+        res = run_scan(cw, a.date, fetch_intraday=not a.no_fetch_intraday, workers=a.workers, watch=True, log=quiet)
     res["cfg"] = cfg
+    base_syms = set(res_base["stage2"].loc[res_base["stage2"]["pass"], "symbol"]) if len(res_base["stage2"]) else set()
     wl = build(res, cfg, not a.no_timemachine)
-    out = ROOT / "reports" / "daily" / f"{res['as_of']:%Y-%m-%d}{'_wide' if a.wide else ''}"
-    counts = write(out, res, wl, a.wide) if len(wl) else {}
+    if len(wl):
+        wl["base_rules"] = wl.symbol.isin(base_syms)
+        cp = cost_pct(cfg)
+        recs = []
+        for r in wl.to_dict("records"):
+            if r["bucket"] in ("in_zone", "waiting"):
+                r.update(scrutinise(r, res["market_ok"], cp))
+            recs.append(r)
+        wl = pd.DataFrame(recs)
+        rank_c = {"STRONG": 0, "MODERATE": 1, "WEAK": 2}
+        order = {b[0]: i for i, b in enumerate(BUCKETS)} | {"near_miss": 9}
+        wl["_b"] = wl.bucket.map(order)
+        wl["_c"] = wl.get("conviction", pd.Series(index=wl.index, dtype=object)).map(rank_c).fillna(3)
+        wl["_base"] = ~wl.base_rules
+        wl["_tm"] = -pd.to_numeric(wl.get("tm_avg_R_filled", pd.Series(np.nan, index=wl.index)), errors="coerce").fillna(-9)
+        wl = wl.sort_values(["_b", "_c", "_base", "_tm"]).drop(columns=["_b", "_c", "_base", "_tm"]).reset_index(drop=True)
+    out = ROOT / "reports" / "daily" / f"{res['as_of']:%Y-%m-%d}{'' if mode == 'base' else '_' + mode}"
+    counts = write(out, res, wl, mode != "base") if len(wl) else {}
+    seconds = time.time() - t0
     print(res["market"]["sentence"])
     print(" → ".join(f"{n} {t}" for t, n in res["steps"]))
     if counts:
         print(f"\nPossible entries: {counts['in_zone']} in zone · {counts['waiting']} waiting · "
-              f"{counts['leg_running']} leg running · {counts['setting_up']} setting up\n")
-        show = wl[wl.bucket != "near_miss"]
-        for key, name, _ in BUCKETS:
-            sub = show[show.bucket == key]
-            if not len(sub):
-                continue
-            print(name)
-            for r in sub.itertuples():
-                if key in ("in_zone", "waiting"):
-                    tm = f" · TM avg {f(getattr(r, 'tm_avg_R_filled', np.nan))}R" if "tm_avg_R_filled" in wl else ""
-                    print(f"  {r.symbol:<12} entry {f(r.entry):>10}  stop {f(r.stop):>10}  T1 {f(r.t1):>10}  "
-                          f"T2 {f(r.t2):>10}  R:R {f(r.rr_t2)}  {'A-like' if r.a_like else 'B-like'}{tm}")
-                elif key == "leg_running":
-                    print(f"  {r.symbol:<12} leg {f(r.leg_low)} → {f(r.leg_high)}  provisional OTE {f(r.ote_79)}–{f(r.ote_62)}")
-                else:
-                    print(f"  {r.symbol:<12} sweep low {f(r.sweep_low)}  trigger: close above {f(r.trigger)} "
-                          f"({f(r.dist_to_trigger_atr, 1)} ATR away)")
-        print(f"\nOpen: {out / 'index.html'}\nTradingView watchlist: {out / 'tradingview_watchlist.txt'}")
-    else:
-        print("No stock reached the 45-minute stage today.")
+              f"{counts['leg_running']} leg running · {counts['setting_up']} setting up")
+        for r in wl[wl.bucket.isin(["in_zone", "waiting"])].itertuples():
+            print(f"  {r.symbol:<12} {r.bucket:<8} {r.conviction:<8} entry {f(r.entry):>10} stop {f(r.stop):>10} "
+                  f"T1 {f(r.t1):>10} R:R {f(r.rr_t2)} TM {f(getattr(r, 'tm_avg_R_filled', np.nan))}R "
+                  f"{'A' if r.a_like else 'B'}{'' if r.base_rules else ' (wide)'}")
+        print(f"\nOpen: {out / 'index.html'}")
+    if not (a.email or a.email_preview):
+        return
+    # full Time Machine + charts for the top buy candidates
+    details = {}
+    plans = wl[wl.bucket.isin(["in_zone", "waiting"])].head(a.detail) if len(wl) else wl
+    wf = cfg["walkforward"]
+    for r in plans.to_dict("records"):
+        sym = r["symbol"]
+        b = res["store"].read_series("h1", sym)
+        per = 7
+        if b is None:
+            b, per = res["m45"][sym], 8
+        else:
+            b = b[b.index <= res["end"]]
+        try:
+            tm = TM.run(b, TM.Plan(sym, r["entry"], r["stop"], r["t1"], r["t2"], float(b.close.iloc[-1])),
+                        TM.TMConfig(replays=5000, valid_sessions=wf["order_valid_sessions"], hold_days=wf["hold_days"],
+                                    partial=wf["partial_at_t1"], cost_pct=cost_pct(cfg), atr_bars=10 * per))
+        except Exception as e:
+            print(f"  Time Machine skipped for {sym}: {e}")
+            continue
+        fan = out / "charts" / f"{sym}_timemachine.png"
+        TM.fan_png(tm, fan, f"{sym}: Time Machine, {tm['config']['fan_paths']:,} replays")
+        details[sym] = {"tm": tm, "fan": fan, "chart": out / "charts" / f"{sym}_45m.png"}
+    # re-scrutinise the detailed candidates with the 5,000-replay Time Machine numbers shown in their cards
+    if details:
+        cp = cost_pct(cfg)
+        for i, r in wl[wl.symbol.isin(list(details))].iterrows():
+            tm = details[r.symbol]["tm"]
+            upd = dict(r, tm_avg_R_filled=tm["avg_R_filled"], tm_fill_pct=tm["fill_rate_pct"], tm_win_pct=tm["win_rate_filled_pct"])
+            upd.update(scrutinise(upd, res["market_ok"], cp))
+            for k in ("tm_avg_R_filled", "tm_fill_pct", "tm_win_pct", "conviction", "pros", "cons", "a_like", "cost_R"):
+                wl.at[i, k] = upd[k]
+    info = funnel_info(res_base, res, wl, res["market_ok"], seconds, mode != "base")
+    conv = wl.get("conviction", pd.Series(dtype=object)).value_counts().to_dict() if len(wl) else {}
+    subj = daily_email.subject(res["as_of"], res["market_ok"], info["counts"], conv, seconds, mode)
+    html_body, text, inline = daily_email.body(info, wl, details, walkforward_lines())
+    env = mailer.load_env()
+    to = [x.strip() for x in env.get("EMAIL_TO", "").split(",") if x.strip()]
+    sender = env.get("GMAIL_USER", "me@example.com")
+    msg = mailer.build_message(subj, html_body, text, sender, to or [sender], inline,
+                               [out / "watchlist.csv", out / "tradingview_watchlist.txt"],
+                               env.get("EMAIL_FROM_NAME", "NSE ICT Screener"))
+    preview = out / "email.html"
+    ph = html_body
+    for k, p in inline.items():
+        ph = ph.replace(f"cid:{k}", f"charts/{p.name}")
+    preview.write_text(ph)
+    (out / "email.eml").write_bytes(bytes(msg))
+    print(f"\nSubject: {subj}\nEmail preview: {preview}")
+    if a.email:
+        if not to:
+            raise SystemExit("Email not sent: add EMAIL_TO=a@x.com,b@y.com to .env")
+        mailer.send(msg, env)
+        print(f"Email sent to {len(to)} recipient(s).")
 
 
 if __name__ == "__main__":

@@ -11,7 +11,9 @@ from ict_engine.viz.mpl import C, plt
 
 LABELS = {"base": "Base (all filters)", "no_market_filter": "Without the market filter",
           "no_rs_filter": "Without relative strength", "no_zone_filter": "Without daily-zone proximity",
-          "no_room_filter": "Without the room-to-target rule", "require_confluence": "Base + FVG/OB confluence required"}
+          "no_room_filter": "Without the room-to-target rule", "require_confluence": "Base + FVG/OB confluence required",
+          "a_like_only": "Base, A-like setups only (confluence + daily up)", "rr3_only": "Base, R:R to T2 ≥ 3 only",
+          "a_like_rr3": "Base, A-like AND R:R ≥ 3", "a_like_no_zone": "A-like, without the daily-zone filter"}
 
 
 def _equity_png(results: dict, path: Path):

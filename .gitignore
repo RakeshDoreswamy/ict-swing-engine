@@ -5,4 +5,4 @@ __pycache__/
 # generated outputs
 reports/
 data/store/
-.DS_Store
+.env

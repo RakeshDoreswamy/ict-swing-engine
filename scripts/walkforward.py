@@ -177,12 +177,21 @@ def run(cfg, tf, workers, max_minutes=None):
     out.mkdir(parents=True, exist_ok=True)
     occ.to_csv(out / "all_setups.csv", index=False)
     results = {}
-    for name in W.ABLATIONS:
-        allowed = set(zip(ctx.loc[ctx[f"ok_{name}"], "symbol"], ctx.loc[ctx[f"ok_{name}"], "date"]))
-        sel = W.select_orders(occ, allowed) if len(occ) else occ
-        if name == "require_confluence" and len(sel):
-            sel = sel[sel.has_confluence]
-        results[name] = sel
+    a_like = lambda o: o.has_confluence.astype(bool) & (o.bias == "up")      # noqa: E731
+    rr3 = lambda o: o.rr_t2 >= 3.0                                           # noqa: E731
+    # (allowed-set column, extra condition on each evening's setup)
+    rule_sets = {name: (name, (lambda o: o.has_confluence.astype(bool)) if name == "require_confluence" else None)
+                 for name in W.ABLATIONS}
+    rule_sets.update({
+        "a_like_only": ("base", a_like),
+        "rr3_only": ("base", rr3),
+        "a_like_rr3": ("base", lambda o: a_like(o) & rr3(o)),
+        "a_like_no_zone": ("no_zone_filter", a_like),
+    })
+    for name, (col, cond) in rule_sets.items():
+        allowed = set(zip(ctx.loc[ctx[f"ok_{col}"], "symbol"], ctx.loc[ctx[f"ok_{col}"], "date"]))
+        cand = occ[cond(occ)] if (cond is not None and len(occ)) else occ
+        results[name] = W.select_orders(cand, allowed) if len(cand) else cand
     base = results["base"]
     base.to_csv(out / "trades.csv", index=False)
     summary = {"timeframe": tf, "test_start": str(start.date()), "test_end": str(end.date()),
