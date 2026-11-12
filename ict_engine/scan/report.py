@@ -73,7 +73,8 @@ img{width:100%;height:auto;border-radius:6px;margin-top:10px}table{border-collap
 .warn{border-left:4px solid var(--dn)}"""
 
 
-def write_html(out: Path, as_of, market: dict, funnel: list, finalists: pd.DataFrame, stage3_all: pd.DataFrame) -> None:
+def write_html(out: Path, as_of, market: dict, funnel: list, finalists: pd.DataFrame, stage3_all: pd.DataFrame,
+               watch_only: bool = False) -> None:
     steps = "".join(f'<div class="step"><b>{n}</b><br><span>{html.escape(t)}</span></div>' + ("<span>→</span>" if i < len(funnel) - 1 else "")
                     for i, (t, n) in enumerate(funnel))
     cards = []
@@ -85,13 +86,14 @@ def write_html(out: Path, as_of, market: dict, funnel: list, finalists: pd.DataF
 <div><span>OTE band</span>{fmt(r.ote_79)}–{fmt(r.ote_62)}</div><div><span>Last close · distance</span>{fmt(r.last_close)} · {fmt(r.dist_to_entry_atr, 1)} ATR</div>
 <div><span>Qty at 1% risk</span>{int(r.qty_1pct):,}</div><div><span>Daily</span>{html.escape(str(r.bias))}, {'discount' if r.discount else 'premium'}, {html.escape(str(r.zone))}</div></div>
 <a href="charts/{r.symbol}_45m.png"><img src="charts/{r.symbol}_45m.png" alt="{html.escape(r.symbol)} 45m chart"></a></div>""")
-    near = stage3_all[~stage3_all["pass"]].copy() if len(stage3_all) else stage3_all
+    near = stage3_all[~stage3_all["pass"].astype(bool)].copy() if len(stage3_all) and "pass" in stage3_all else pd.DataFrame()
     rows = "".join(f"<tr><td>{html.escape(str(r.symbol))}</td><td>{html.escape(str(r.state))}</td><td>{html.escape(str(r.reason))}</td></tr>"
                    for r in near.head(60).itertuples()) if len(near) else ""
     page = f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ICT scan {pd.Timestamp(as_of):%d %b %Y}</title><style>{CSS}</style></head><body><main>
 <h1>ICT 45-minute OTE scan · {pd.Timestamp(as_of):%d %b %Y}</h1><p class="muted">NSE equities, long side. Every value comes from the engine's rules on closed bars.</p>
 <div class="card"><b>Market (stage 0):</b> {html.escape(market['sentence'])}</div>
+{'<div class="card warn"><b>WATCH LIST ONLY.</b> The market filter blocks new longs today, so nothing below can be grade A. Use these to learn the setups and to be ready when the market turns.</div>' if watch_only else ''}
 <div class="funnel">{steps}</div>
 {''.join(cards) if cards else '<div class="card">No stock passed every stage today.</div>'}
 <h2>Stage 3 near misses</h2><div class="card" style="overflow-x:auto"><table><tr><th>Symbol</th><th>State</th><th>Why it dropped</th></tr>{rows}</table></div>

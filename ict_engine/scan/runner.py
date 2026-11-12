@@ -68,7 +68,8 @@ def run_scan(cfg: dict, as_of=None, fetch_intraday: bool = True, force: bool = F
     log(f"Stage 0 · {market['sentence']}")
     market_ok = market["allowed_side"] != "none"
     if not market_ok and not force:
-        log("Stage 0 blocks new longs today; stopping (use --force to scan anyway).")
+        log("Stage 0 blocks new longs: continuing as a WATCH LIST (no grade A). Use --strict to stop here.")
+    if not market_ok and force == "strict":
         report.write_html(out, as_of, market, [("NSE universe", n_universe), ("stage 0: market allows longs", 0)],
                           pd.DataFrame(), pd.DataFrame())
         (out / "market.json").write_text(json.dumps(market, indent=2, default=str))
@@ -115,6 +116,8 @@ def run_scan(cfg: dict, as_of=None, fetch_intraday: bool = True, force: bool = F
                                           "reason": "no 15m data in the store"})], ignore_index=True)
     if len(s3):
         funnel_rows.append(s3.set_index("symbol").assign(stage=3)[["stage", "reason"]])
+    if len(s3):
+        s3["pass"] = s3["pass"].astype(bool)
     s3_pass = s3[s3["pass"]] if len(s3) else s3
     log(f"Stage 3 · {len(s2_pass)} → {len(s3_pass)} (45m sweep → MSS → OTE, R:R to T2)")
 
@@ -139,6 +142,6 @@ def run_scan(cfg: dict, as_of=None, fetch_intraday: bool = True, force: bool = F
     steps = [("NSE universe", n_universe), ("stage 1: liquid & tradeable", len(s1_pass)),
              ("stage 2: daily ICT context", len(s2_pass)), ("stage 3: 45m OTE setup", len(s3_pass)),
              ("ranked", len(final))]
-    report.write_html(out, as_of, market, steps, final, s3)
+    report.write_html(out, as_of, market, steps, final, s3, watch_only=not market_ok)
     (out / "market.json").write_text(json.dumps(market, indent=2, default=str))
     return {"out": out, "market": market, "steps": steps, "final": final, "stage1": s1, "stage2": s2, "stage3": s3}
