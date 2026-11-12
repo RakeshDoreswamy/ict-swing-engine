@@ -16,6 +16,9 @@ def fmt(x, d=2):
 
 
 def chart(sym: str, m45: pd.DataFrame, r: dict, cfg: dict, path: Path, daily: dict | None = None) -> None:
+    r = dict(r)
+    for k in ("sweep_bar", "mss_bar", "leg_high_bar", "leg_low_bar"):
+        r[k] = int(r[k])   # bar positions can come back as floats after DataFrame merges
     nb = cfg["scan"]["stage4"]["chart_bars"]
     off = max(0, len(m45) - nb)
     df = m45.iloc[off:]
