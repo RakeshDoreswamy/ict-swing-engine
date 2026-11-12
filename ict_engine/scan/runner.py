@@ -73,7 +73,7 @@ def add_timemachine(final: pd.DataFrame, cfg: dict, store: Store, end, replays: 
 
 
 def run_scan(cfg: dict, as_of=None, fetch_intraday: bool = True, force: bool = False, workers: int = 4,
-             out_dir: str | Path | None = None, log=print, timemachine: bool = False) -> dict:
+             out_dir: str | Path | None = None, log=print, timemachine: bool = False, watch: bool = False) -> dict:
     sc = cfg["scan"]
     store = Store(sc["store_dir"])
     panel, indices, universe, exclude, events = load_inputs(cfg, store)
@@ -134,7 +134,7 @@ def run_scan(cfg: dict, as_of=None, fetch_intraday: bool = True, force: bool = F
             continue
         m45 = to_45m(m15[m15.index <= end], cfg)
         m45s[sym] = m45
-        args.append((sym, m45, cfg, list(ctx.loc[sym, "daily_bsl_levels"])))
+        args.append((sym, m45, cfg, list(ctx.loc[sym, "daily_bsl_levels"]), watch))
     s3 = pd.DataFrame(_pool_map(stage3_symbol, args, workers)) if args else pd.DataFrame(columns=["symbol", "pass", "state", "reason"])
     missing = [s for s in s2_pass if s not in m45s]
     if missing:
@@ -173,4 +173,5 @@ def run_scan(cfg: dict, as_of=None, fetch_intraday: bool = True, force: bool = F
              ("ranked", len(final))]
     report.write_html(out, as_of, market, steps, final, s3, watch_only=not market_ok)
     (out / "market.json").write_text(json.dumps(market, indent=2, default=str))
-    return {"out": out, "market": market, "steps": steps, "final": final, "stage1": s1, "stage2": s2, "stage3": s3}
+    return {"out": out, "market": market, "steps": steps, "final": final, "stage1": s1, "stage2": s2, "stage3": s3,
+            "m45": m45s, "store": store, "end": end, "as_of": as_of, "market_ok": market_ok}

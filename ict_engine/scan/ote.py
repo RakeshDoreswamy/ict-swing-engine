@@ -33,7 +33,7 @@ from ict_engine.detectors.swings import swing_table
 ACTIONABLE = ("waiting", "in_zone")
 
 
-def find_ote_setup(m45: pd.DataFrame, cfg: dict, daily_bsl: list | None = None) -> dict:
+def _find_ote_setup(m45: pd.DataFrame, cfg: dict, daily_bsl: list | None = None) -> dict:
     c = cfg["scan"]["stage3"]
     n = len(m45)
     res = {"state": "none", "reason": "no bullish MSS after a sweep in the last "
@@ -65,8 +65,16 @@ def find_ote_setup(m45: pd.DataFrame, cfg: dict, daily_bsl: list | None = None) 
         hb = mb + int(np.argmax(h[mb:n]))
         leg_high = float(h[hb])
         if hb >= n - 1:
-            first_reason = first_reason or "leg still making new highs (no pullback yet)"
-            continue
+            # structure has shifted but the rally leg is still making new highs: the OTE band is not
+            # fixed yet. Report the newest such setup as "leg_running" with a provisional band.
+            rng0 = leg_high - leg_low
+            return {"state": "leg_running", "reason": "leg still making new highs (no pullback yet)",
+                    "sweep_bar": sb, "sweep_time": m45.index[sb], "sweep_type": s.swing_type,
+                    "sweep_level": float(s.level), "mss_bar": mb, "mss_time": m45.index[mb],
+                    "mss_level": float(m.level), "leg_low": leg_low, "leg_low_bar": low_bar,
+                    "leg_high": leg_high, "leg_high_bar": hb, "ote_62": leg_high - c["ote_low"] * rng0,
+                    "ote_79": leg_high - c["ote_high"] * rng0, "entry": leg_high - c["ote_entry"] * rng0,
+                    "last_close": float(cl[-1]), "atr45": a_now}
         rng = leg_high - leg_low
         if rng <= 0:
             continue
@@ -122,9 +130,58 @@ def find_ote_setup(m45: pd.DataFrame, cfg: dict, daily_bsl: list | None = None) 
     return res
 
 
-def stage3_symbol(sym: str, m45: pd.DataFrame, cfg: dict, daily_bsl: list | None) -> dict:
+def setting_up(m45: pd.DataFrame, cfg: dict) -> dict | None:
+    """Earlier stage: a sell-side sweep in the last ``sweep_lookback`` bars, no bullish MSS since, and the
+    sweep low still intact. The trigger is the last confirmed short-term high: a displacement CLOSE above
+    it would be the MSS that completes the setup."""
+    c = cfg["scan"]["stage3"]
+    n = len(m45)
+    if n < 40:
+        return None
+    sw = swing_table(m45, cfg)
+    sweeps = B.sweeps(m45, sw)
+    if sweeps is None or sweeps.empty:
+        return None
+    ss = sweeps[(sweeps.side == "sell-side") & (sweeps.bar >= n - c["sweep_lookback"])]
+    if ss.empty:
+        return None
+    s = ss.iloc[-1]
+    sb = int(s.bar)
+    mss = B.mss_events(m45, sw, cfg["confirmation"]["mss_displacement_atr_mult"])
+    if mss is not None and len(mss) and ((mss.side == "bull") & (mss.bar > sb)).any():
+        return None
+    low = float(m45.low.iloc[sb])
+    if sb + 1 < n and float(m45.low.iloc[sb + 1:].min()) < low:
+        return None                                             # the sweep low has since been taken
+    highs = sw[(sw.side == "high") & (sw.bar + 1 <= n - 1)]
+    if highs.empty:
+        return None
+    trig = float(highs.sort_values("bar").price.iloc[-1])
+    last = float(m45.close.iloc[-1])
+    if trig <= last:
+        return None
+    a = float(B.atr(m45).iloc[-1])
+    return {"state": "setting_up", "reason": "", "sweep_bar": sb, "sweep_time": m45.index[sb],
+            "sweep_type": s.swing_type, "sweep_level": float(s.level), "sweep_low": low, "trigger": trig,
+            "last_close": last, "atr45": a, "dist_to_trigger_atr": (trig - last) / a if a else np.nan,
+            "bars_since_sweep": n - 1 - sb}
+
+
+def find_ote_setup(m45: pd.DataFrame, cfg: dict, daily_bsl: list | None = None, watch: bool = False) -> dict:
+    """Stage-3 OTE setup (see the module docstring). With ``watch`` it also reports the earlier
+    'setting_up' stage when no setup is actionable."""
+    r = _find_ote_setup(m45, cfg, daily_bsl)
+    if watch and r.get("state") not in ACTIONABLE:
+        early = setting_up(m45, cfg)
+        if early:
+            early["previous"] = r.get("reason", "")
+            return early
+    return r
+
+
+def stage3_symbol(sym: str, m45: pd.DataFrame, cfg: dict, daily_bsl: list | None, watch: bool = False) -> dict:
     try:
-        r = find_ote_setup(m45, cfg, daily_bsl)
+        r = find_ote_setup(m45, cfg, daily_bsl, watch)
     except Exception as e:
         r = {"state": "error", "reason": f"error: {type(e).__name__}: {e}"}
     r["symbol"] = sym
