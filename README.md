@@ -58,6 +58,16 @@ Yahoo keeps only 60 days of 15m bars, so every download is cached in `data/store
 All thresholds are in `config.yaml → scan:`. Rules for each stage are documented at the top of
 `ict_engine/scan/stages.py` and `ict_engine/scan/ote.py`.
 
+### Daily email on GitHub Actions
+`.github/workflows/daily-screener.yml` runs `python -m scripts.daily --fetch --require-today --email`
+at 19:37 IST, Monday to Friday, and on demand (Actions → Daily screener → Run workflow; choose a date,
+mode, or a preview without email). NSE holidays are skipped automatically: NIFTY's daily bar shows whether
+the exchange traded. If the stock bars for today are missing, the run fails and GitHub notifies you.
+Market data is kept between runs in the Actions cache; the first run builds it, which takes longer.
+Add repository secrets `GMAIL_USER`, `GMAIL_APP_PASSWORD`, `EMAIL_TO` (and optionally `EMAIL_FROM_NAME`),
+for example with `gh secret set -f .env`. Never put them in the repo: it is public.
+GitHub pauses scheduled workflows in public repos after 60 days without a commit; re-enable it on the Actions tab.
+
 ## Concept website (25 pages)
 `docs/` is a static site, one page per concept. Each page has the idea, the exact rule, a schematic,
 a **real NIFTY 15-minute or daily example found by the engine**, common mistakes and an exercise.

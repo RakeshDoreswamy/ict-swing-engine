@@ -42,6 +42,25 @@ def f(x, d=2):
     return "—" if x is None or (isinstance(x, float) and np.isnan(x)) else f"{x:,.{d}f}"
 
 
+def fetch_h1(res) -> None:
+    """60m history (Yahoo, up to 730 days) for today's buy candidates, so the Time Machine has a deep pool.
+    Missing symbols get the full history; cached ones a 60-day top-up."""
+    from ict_engine.data.providers import yahoo
+    s3, store = res["stage3"], res["store"]
+    if s3 is None or not len(s3):
+        return
+    syms = s3.loc[s3["state"].isin(["in_zone", "waiting"]), "symbol"].tolist()
+    new = [s for s in syms if store.read_series("h1", s) is None]
+    old = [s for s in syms if s not in new]
+    for group, period in ((new, "730d"), (old, "60d")):
+        if group:
+            try:
+                for sym, df in yahoo.intraday(group, "60m", period).items():
+                    store.merge_series("h1", sym, df)
+            except Exception as e:  # the Time Machine falls back to 45m bars
+                print(f"  60m download failed ({e}); Time Machine uses 45m bars where 60m is missing.")
+
+
 def build(res, cfg, tm: bool) -> pd.DataFrame:
     s2, s3 = res["stage2"], res["stage3"]
     if s3 is None or not len(s3):
@@ -187,12 +206,26 @@ def main():
     ap.add_argument("--email", action="store_true", help="send the email (settings in .env)")
     ap.add_argument("--email-preview", action="store_true", help="write email.html without sending")
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
+    ap.add_argument("--require-today", action="store_true",
+                    help="unattended runs: exit quietly if NSE did not trade today, fail if today's bars are missing")
     a = ap.parse_args()
     mode = "wide" if a.wide else a.mode
     t0 = time.time()
     if a.fetch:
         subprocess.run([sys.executable, "-m", "scripts.fetch_data", "--daily", "--indices"], cwd=ROOT, check=False)
     cfg = load_config()
+    if a.require_today and not a.date:
+        from ict_engine.data import freshness
+        from ict_engine.data.store import Store
+        st = Store(cfg["scan"]["store_dir"])
+        idx, panel = st.read_series("index", "nifty50"), st.read_daily_panel()
+        state, msg = freshness.status(panel.date.max() if len(panel) else None,
+                                      idx.index.max() if idx is not None else None, freshness.today_ist())
+        print(msg)
+        if state == "closed":
+            return
+        if state == "stale":
+            raise SystemExit(1)
     quiet = lambda *x: None  # noqa: E731
     res_base = run_scan(copy.deepcopy(cfg), a.date, fetch_intraday=not a.no_fetch_intraday, workers=a.workers,
                         watch=True, log=quiet)
@@ -204,6 +237,8 @@ def main():
         res = run_scan(cw, a.date, fetch_intraday=not a.no_fetch_intraday, workers=a.workers, watch=True, log=quiet)
     res["cfg"] = cfg
     base_syms = set(res_base["stage2"].loc[res_base["stage2"]["pass"], "symbol"]) if len(res_base["stage2"]) else set()
+    if not a.no_fetch_intraday and not a.no_timemachine:
+        fetch_h1(res)
     wl = build(res, cfg, not a.no_timemachine)
     if len(wl):
         wl["base_rules"] = wl.symbol.isin(base_syms)

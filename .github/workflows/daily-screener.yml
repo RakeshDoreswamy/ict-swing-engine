@@ -1,0 +1,94 @@
+# Daily NSE ICT screener: runs after market hours on weekdays and emails the next-day list.
+# Also runnable by hand: GitHub → Actions → "Daily screener" → Run workflow.
+#
+# Needs these repository secrets (Settings → Secrets and variables → Actions):
+#   GMAIL_USER, GMAIL_APP_PASSWORD, EMAIL_TO   (EMAIL_FROM_NAME optional)
+# The repo is public: never put these values in this file. Logs only print the recipient COUNT.
+name: Daily screener
+
+on:
+  schedule:
+    - cron: "7 14 * * 1-5"      # 14:07 UTC = 19:37 IST, Mon–Fri (NSE bhavcopy is usually out by then)
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Scan date YYYY-MM-DD (blank = latest session)"
+        required: false
+        default: ""
+      email:
+        description: "Send the email"
+        type: boolean
+        default: true
+      mode:
+        description: "base = tested rules only · wide = relaxed daily filters · both"
+        type: choice
+        options: [both, base, wide]
+        default: both
+
+concurrency:
+  group: daily-screener
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  screen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      TZ: Asia/Kolkata
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # Market data cache (data/store): the first run downloads ~400 days of history (10–30 min);
+      # later runs only add the new day. A fresh cache entry is saved after every run.
+      - name: Restore market data
+        uses: actions/cache/restore@v4
+        with:
+          path: data/store
+          key: store-${{ github.run_id }}
+          restore-keys: store-
+
+      - name: Run screener
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          EMAIL_FROM_NAME: ${{ secrets.EMAIL_FROM_NAME }}
+          IN_DATE: ${{ inputs.date }}
+          IN_MODE: ${{ inputs.mode || 'both' }}
+          IN_EMAIL: ${{ github.event_name == 'schedule' || inputs.email }}
+        run: |
+          args="--fetch --mode $IN_MODE --workers 4"
+          if [ -n "$IN_DATE" ]; then args="$args --date $IN_DATE"; else args="$args --require-today"; fi
+          if [ "$IN_EMAIL" = "true" ]; then args="$args --email"; else args="$args --email-preview"; fi
+          echo "python -m scripts.daily $args"
+          python -m scripts.daily $args
+
+      - name: Save market data
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data/store
+          key: store-${{ github.run_id }}
+
+      # Report pages and charts (no email file: it holds the recipient addresses).
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-report-${{ github.run_id }}
+          path: |
+            reports/daily/
+            !reports/daily/**/*.eml
+          if-no-files-found: ignore
+          retention-days: 14

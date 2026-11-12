@@ -20,6 +20,22 @@ from ict_engine.data.providers import nse, yahoo
 from ict_engine.data.store import Store
 
 
+def _yf_daily(cfg, start) -> pd.DataFrame:
+    sc = cfg["scan"]
+    uni = nse.load_equity_list(ROOT / sc["universe_file"], tuple(sc["series"]))
+    syms = uni.SYMBOL.tolist()
+    frames = []
+    for i in range(0, len(syms), 100):
+        part = [f"{s}.NS" for s in syms[i:i + 100]]
+        for t, df in yahoo.daily(part, str(start)).items():
+            df = df.reset_index()
+            df["symbol"] = t[:-3]
+            df["turnover"] = df.close * df.volume
+            frames.append(df)
+        print(f"  yfinance daily {min(i + 100, len(syms))}/{len(syms)}")
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
 def fetch_daily(cfg, store, source, days=None):
     sc = cfg["scan"]
     panel = store.read_daily_panel()
@@ -29,25 +45,34 @@ def fetch_daily(cfg, store, source, days=None):
         have = set(pd.to_datetime(panel.date).dt.date.unique()) if len(panel) else set()
         new = nse.fetch_bhavcopy_range(start, end, have, tuple(sc["series"]))
         if new.empty and not have:
-            print("Bhavcopy download returned nothing (NSE may be blocking). Try --source yfinance.")
-            return
-        new = new.drop(columns=["series"])
+            print("Bhavcopy download returned nothing (NSE may be blocking this network): using Yahoo instead.")
+            new = _yf_daily(cfg, start)
+        elif len(new):
+            new = new.drop(columns=["series"])
     else:
-        uni = nse.load_equity_list(ROOT / sc["universe_file"], tuple(sc["series"]))
-        syms = uni.SYMBOL.tolist()
-        frames = []
-        for i in range(0, len(syms), 100):
-            part = [f"{s}.NS" for s in syms[i:i + 100]]
-            for t, df in yahoo.daily(part, start.isoformat()).items():
-                df = df.reset_index()
-                df["symbol"] = t[:-3]
-                df["turnover"] = df.close * df.volume
-                frames.append(df)
-            print(f"  yfinance daily {min(i + 100, len(syms))}/{len(syms)}")
-        new = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        new = _yf_daily(cfg, start)
     if len(new):
-        merged = store.merge_daily_panel(new)
+        store.merge_daily_panel(new)
+    top_up_daily(cfg, store)
+    merged = store.read_daily_panel()
+    if len(merged):
         print(f"Daily panel: {merged.symbol.nunique()} symbols, {merged.date.min():%d %b %Y} → {merged.date.max():%d %b %Y}")
+
+
+def top_up_daily(cfg, store):
+    """If NIFTY has a newer session than the stock panel (bhavcopy not out yet), fill the gap from Yahoo."""
+    idx = store.read_series("index", "nifty50")
+    panel = store.read_daily_panel()
+    if idx is None or panel.empty:
+        return
+    last_idx, last_panel = idx.index.max().normalize(), panel.date.max().normalize()
+    if last_panel >= last_idx:
+        return
+    print(f"Stock bars end {last_panel:%d %b}, NIFTY has {last_idx:%d %b}: topping up from Yahoo…")
+    new = _yf_daily(cfg, (last_panel + pd.Timedelta(days=1)).date())
+    if len(new):
+        new = new[pd.to_datetime(new["date"]).dt.normalize() > last_panel]
+        store.merge_daily_panel(new)
 
 
 def fetch_indices(cfg, store):
@@ -80,10 +105,10 @@ def main():
         dest.parent.mkdir(parents=True, exist_ok=True)
         nse.download_equity_list(dest)
         print(f"Universe: {len(nse.load_equity_list(dest))} EQ/BE symbols → {dest.relative_to(ROOT)}")
+    if a.indices or a.all:          # first: NIFTY's last bar tells the daily step whether NSE traded today
+        fetch_indices(cfg, store)
     if a.daily or a.all:
         fetch_daily(cfg, store, a.source or cfg["scan"]["daily_source"], a.days)
-    if a.indices or a.all:
-        fetch_indices(cfg, store)
     if a.m15:
         for sym, df in yahoo.intraday_15m(a.m15).items():
             out = store.merge_series("m15", sym, df)
