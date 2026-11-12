@@ -52,13 +52,21 @@ def daily(tickers: list[str], start: str) -> dict[str, pd.DataFrame]:
 
 def intraday_15m(symbols: list[str], period: str = "60d", chunk: int = 50) -> dict[str, pd.DataFrame]:
     """15-minute bars for NSE symbols (adds the .NS suffix). Downloads in chunks."""
+    return intraday(symbols, "15m", period, chunk)
+
+
+def intraday(symbols: list[str], interval: str = "15m", period: str = "60d", chunk: int = 50,
+             log=None) -> dict[str, pd.DataFrame]:
+    """Intraday bars for NSE symbols. Yahoo limits: 15m → 60 days, 60m → 730 days."""
     out: dict[str, pd.DataFrame] = {}
     for i in range(0, len(symbols), chunk):
         part = symbols[i:i + chunk]
         tickers = [f"{s}.NS" for s in part]
-        raw = _yf().download(tickers, period=period, interval="15m", group_by="ticker",
+        raw = _yf().download(tickers, period=period, interval=interval, group_by="ticker",
                              auto_adjust=False, threads=True, progress=False)
         for t, df in _split(raw, tickers).items():
             # drop the bar still forming (Yahoo includes it during market hours)
             out[t[:-3]] = df
+        if log:
+            log(f"  {interval}: {min(i + chunk, len(symbols))}/{len(symbols)} symbols")
     return out

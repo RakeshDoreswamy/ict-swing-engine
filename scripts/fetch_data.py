@@ -6,6 +6,7 @@
     python -m scripts.fetch_data --all                 # all three
     python -m scripts.fetch_data --m15 RELIANCE TCS    # 15m bars for chosen symbols (Yahoo, last 60 days)
     python -m scripts.fetch_data --daily --source yfinance   # daily from Yahoo instead of bhavcopy
+    python -m scripts.fetch_data --daily --days 730          # longer history for the walk-forward
 """
 from __future__ import annotations
 
@@ -19,11 +20,11 @@ from ict_engine.data.providers import nse, yahoo
 from ict_engine.data.store import Store
 
 
-def fetch_daily(cfg, store, source):
+def fetch_daily(cfg, store, source, days=None):
     sc = cfg["scan"]
     panel = store.read_daily_panel()
     end = date.today()
-    start = end - timedelta(days=int(sc["daily_lookback_days"] * 1.45))
+    start = end - timedelta(days=int(days or sc["daily_lookback_days"] * 1.45))
     if source == "bhavcopy":
         have = set(pd.to_datetime(panel.date).dt.date.unique()) if len(panel) else set()
         new = nse.fetch_bhavcopy_range(start, end, have, tuple(sc["series"]))
@@ -70,6 +71,7 @@ def main():
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--source", choices=["bhavcopy", "yfinance"])
     ap.add_argument("--m15", nargs="*")
+    ap.add_argument("--days", type=int, help="calendar days of daily history (walk-forward needs ~700)")
     a = ap.parse_args()
     cfg = load_config()
     store = Store(cfg["scan"]["store_dir"])
@@ -79,7 +81,7 @@ def main():
         nse.download_equity_list(dest)
         print(f"Universe: {len(nse.load_equity_list(dest))} EQ/BE symbols → {dest.relative_to(ROOT)}")
     if a.daily or a.all:
-        fetch_daily(cfg, store, a.source or cfg["scan"]["daily_source"])
+        fetch_daily(cfg, store, a.source or cfg["scan"]["daily_source"], a.days)
     if a.indices or a.all:
         fetch_indices(cfg, store)
     if a.m15:

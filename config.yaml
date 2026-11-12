@@ -166,3 +166,10 @@ scan:
     top_n: 25
     weights: {rr: 0.25, confluence: 0.20, zone: 0.15, rs: 0.15, distance: 0.15, bias: 0.10}
     chart_bars: 120
+
+# ==== Walk-forward validation (scripts/walkforward.py) ====
+walkforward:
+  order_valid_sessions: 2          # the 70.5% limit stays open for this many sessions after the scan
+  hold_days: 15                    # time stop after the fill
+  partial_at_t1: 0.5               # take this fraction at T1, then stop to breakeven
+  window_bars: 240                 # intraday bars given to stage 3 on each scan day
