@@ -35,6 +35,29 @@ data/raw/                   OHLCV CSVs (one file per symbol)
 data/events/events.csv      earnings / RBI / Budget / rebalancing calendar
 ```
 
+## NSE-wide ICT scanner (45-minute OTE)
+A funnel from ~2,500 NSE equities to a short ranked list, with an annotated 45m chart for each finalist.
+
+| Stage | Data | What it checks |
+|---|---|---|
+| 0 Market | NIFTY 500, India VIX, breadth | daily structure not down, breadth ≥ 40%, VIX ≤ 22 → longs allowed |
+| 1 Universe | daily, all symbols | 20d turnover ≥ 10 Cr, price ≥ 50, ATR% 1–6, history, exclude list, earnings |
+| 2 Daily ICT | daily | bias up/range, in discount, within 1 ATR of a PD array, ≥ 2 ATR room to buy-side liquidity, RS |
+| 3 45m OTE | 15m → 45m (09:15-anchored, last candle 14:30–15:30) | sell-side sweep → bullish MSS → pullback into 62–79%, R:R to T2 ≥ 2 |
+| 4 Rank | | grade A/B/C, score, quantity at 1% risk, charts, HTML |
+
+```bash
+pip install -r requirements.txt
+python -m scripts.fetch_data --all          # NSE list + bhavcopy daily (official) + indices (Yahoo); needs internet
+python -m scripts.scan                      # downloads 15m only for stage-2 survivors, then ranks
+open reports/scans/<date>/index.html
+python -m scripts.scan --date 2026-11-12 --no-fetch   # replay an earlier day from the cache
+```
+Free data: daily from NSE bhavcopy (official end-of-day files), indices and 15m from Yahoo Finance.
+Yahoo keeps only 60 days of 15m bars, so every download is cached in `data/store/m15` and the history grows.
+All thresholds are in `config.yaml → scan:`. Rules for each stage are documented at the top of
+`ict_engine/scan/stages.py` and `ict_engine/scan/ote.py`.
+
 ## Concept website (25 pages)
 `docs/` is a static site, one page per concept. Each page has the idea, the exact rule, a schematic,
 a **real NIFTY 15-minute or daily example found by the engine**, common mistakes and an exercise.

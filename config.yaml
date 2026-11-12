@@ -118,3 +118,51 @@ journal:
   graduation_min_trades: 30
   graduation_min_avg_r: 0.0
   starting_live_size_pct: 25
+
+# ==== NSE-wide ICT scanner (scripts/scan.py) ====
+scan:
+  side: long                       # long only (delivery). "both" adds shorts for study.
+  store_dir: data/store            # local cache (Parquet when pyarrow is installed, else CSV)
+  universe_file: data/universe/EQUITY_L.csv      # NSE equity list (SYMBOL, SERIES)
+  exclude_file: data/universe/exclude.csv        # your ASM/GSM/T2T list: one SYMBOL per line
+  series: [EQ, BE]
+  daily_source: bhavcopy           # bhavcopy (official NSE, free) | yfinance
+  intraday_source: yfinance        # free; Yahoo keeps only the last 60 days of 15m bars
+  daily_lookback_days: 400
+  indices: {nifty50: "^NSEI", nifty500: "^CRSLDX", vix: "^INDIAVIX"}
+  resample_45m:
+    anchor: "09:15"
+    merge_last_partial: true       # true: 8 bars/day, last = 14:30-15:30. false: 9th 15-minute bar
+  stage0:                          # market regime
+    breadth_min_pct: 40            # % of universe above 50-day SMA
+    vix_max: 22
+    block_on_down_bias: true       # NIFTY 500 daily structure down -> no new longs
+  stage1:                          # universe filter (daily)
+    min_turnover_cr: 10            # 20-day average, Rs crore
+    min_price: 50
+    atr_pct_min: 1.0
+    atr_pct_max: 6.0
+    min_history_bars: 200
+    holding_days: 15               # skip if earnings fall within this many days
+  stage2:                          # daily ICT context
+    require_bias: [up, range]      # stock daily structure allowed for longs
+    require_discount: true
+    zone_proximity_atr: 1.0        # within this many ATR of a daily PD array
+    min_room_atr: 2.0              # distance to the next open buy-side liquidity
+    rs_lookback: 20
+    rs_min_pct: 50                 # percentile vs other survivors
+  stage3:                          # 45-minute OTE trigger
+    sweep_lookback: 15             # sweep must be within N bars before the MSS
+    max_setup_age: 40              # MSS no older than N 45m bars
+    stale_after_high: 30           # pullback must start within N bars of the leg high
+    ote_low: 0.62
+    ote_high: 0.79
+    ote_entry: 0.705
+    stop_buffer_atr: 0.25
+    min_stop_atr: 0.5
+    min_rr_t2: 2.0
+    require_confluence_for_a: true # FVG or OB from the leg overlapping the OTE band
+  stage4:
+    top_n: 25
+    weights: {rr: 0.25, confluence: 0.20, zone: 0.15, rs: 0.15, distance: 0.15, bias: 0.10}
+    chart_bars: 120

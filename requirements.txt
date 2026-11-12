@@ -4,3 +4,5 @@ PyYAML>=6.0
 matplotlib>=3.8
 pytest>=8.0
 yfinance>=0.2.40   # optional data source
+pyarrow>=14
+requests>=2.31
