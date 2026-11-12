@@ -46,8 +46,34 @@ def load_inputs(cfg: dict, store: Store):
     return panel, indices, universe, exclude, events
 
 
+def add_timemachine(final: pd.DataFrame, cfg: dict, store: Store, end, replays: int = 2000) -> pd.DataFrame:
+    """Time Machine odds for each finalist (60m pool when cached, else 45m)."""
+    from ict_engine.backtest.walkforward import cost_pct
+    from ict_engine.sim import timemachine as TM
+
+    wf = cfg["walkforward"]
+    rows = []
+    for r in final.itertuples():
+        b = store.read_series("h1", r.symbol)
+        per = 7
+        if b is None:
+            m15 = store.read_series("m15", r.symbol)
+            b, per = (to_45m(m15[m15.index <= end], cfg), 8) if m15 is not None else (None, 8)
+        else:
+            b = b[b.index <= end]
+        try:
+            o = TM.run(b, TM.Plan(r.symbol, r.entry, r.stop, r.t1, r.t2, float(b.close.iloc[-1])),
+                       TM.TMConfig(replays=replays, valid_sessions=wf["order_valid_sessions"], hold_days=wf["hold_days"],
+                                   partial=wf["partial_at_t1"], cost_pct=cost_pct(cfg), atr_bars=10 * per, fan_paths=10))
+            rows.append({"symbol": r.symbol, "tm_fill_pct": o["fill_rate_pct"], "tm_avg_R_filled": o["avg_R_filled"],
+                         "tm_win_pct": o["win_rate_filled_pct"], "tm_verdict": o["verdict"]})
+        except Exception as e:
+            rows.append({"symbol": r.symbol, "tm_verdict": f"Time Machine skipped: {e}"})
+    return final.merge(pd.DataFrame(rows), on="symbol", how="left")
+
+
 def run_scan(cfg: dict, as_of=None, fetch_intraday: bool = True, force: bool = False, workers: int = 4,
-             out_dir: str | Path | None = None, log=print) -> dict:
+             out_dir: str | Path | None = None, log=print, timemachine: bool = False) -> dict:
     sc = cfg["scan"]
     store = Store(sc["store_dir"])
     panel, indices, universe, exclude, events = load_inputs(cfg, store)
@@ -126,6 +152,9 @@ def run_scan(cfg: dict, as_of=None, fetch_intraday: bool = True, force: bool = F
     if len(s3_pass):
         merged = s3_pass.merge(s2.drop(columns=["pass", "reason"]), on="symbol", how="left", suffixes=("", "_d"))
         final = rank(merged, cfg, market_ok).head(sc["stage4"]["top_n"])
+        if timemachine and len(final):
+            log(f"Time Machine: replaying {len(final)} plan(s)…")
+            final = add_timemachine(final, cfg, store, end)
         for r in final.to_dict("records"):
             report.chart(r["symbol"], m45s[r["symbol"]], r, cfg, out / "charts" / f"{r['symbol']}_45m.png")
     log(f"Stage 4 · top {len(final)} ranked; charts in {out.relative_to(ROOT) if out.is_relative_to(ROOT) else out}")
@@ -135,7 +164,7 @@ def run_scan(cfg: dict, as_of=None, fetch_intraday: bool = True, force: bool = F
     funnel.to_csv(out / "funnel.csv")
     cols = ["symbol", "grade", "score", "state", "entry", "stop", "t1", "t2", "rr_t1", "rr_t2", "ote_79", "ote_62",
             "last_close", "dist_to_entry_atr", "qty_1pct", "has_confluence", "sweep_time", "mss_time", "bias",
-            "discount", "zone", "rs_pct"]
+            "discount", "zone", "rs_pct", "tm_fill_pct", "tm_win_pct", "tm_avg_R_filled", "tm_verdict"]
     if len(final):
         final[[c for c in cols if c in final.columns]].to_csv(out / "scan.csv", index=False)
         (out / "tradingview_watchlist.txt").write_text("\n".join(f"NSE:{s}" for s in final.symbol))

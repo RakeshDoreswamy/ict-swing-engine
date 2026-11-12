@@ -44,6 +44,11 @@ def _split(raw: pd.DataFrame, tickers: list[str]) -> dict[str, pd.DataFrame]:
     return out
 
 
+def _shorter(period: str) -> list[str]:
+    days = int(period.rstrip("d")) if period.endswith("d") else 730
+    return [f"{d}d" for d in (540, 365, 250, 180, 120, 60) if d < days]
+
+
 def daily(tickers: list[str], start: str) -> dict[str, pd.DataFrame]:
     raw = _yf().download(tickers, start=start, interval="1d", group_by="ticker",
                          auto_adjust=False, threads=True, progress=False)
@@ -64,9 +69,21 @@ def intraday(symbols: list[str], interval: str = "15m", period: str = "60d", chu
         tickers = [f"{s}.NS" for s in part]
         raw = _yf().download(tickers, period=period, interval=interval, group_by="ticker",
                              auto_adjust=False, threads=True, progress=False)
-        for t, df in _split(raw, tickers).items():
-            # drop the bar still forming (Yahoo includes it during market hours)
+        got = _split(raw, tickers)
+        for t, df in got.items():
             out[t[:-3]] = df
+        # Yahoo rejects the whole request when a stock has less history than `period`
+        # (recent IPOs): retry those one by one with shorter periods.
+        for t in [t for t in tickers if t not in got]:
+            for p in _shorter(period):
+                try:
+                    r = _yf().download(t, period=p, interval=interval, auto_adjust=False, progress=False)
+                except Exception:
+                    continue
+                sub = _split(r, [t])
+                if sub:
+                    out[t[:-3]] = sub[t]
+                    break
         if log:
             log(f"  {interval}: {min(i + chunk, len(symbols))}/{len(symbols)} symbols")
     return out

@@ -15,9 +15,11 @@ Three steps:
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import os
-from concurrent.futures import ProcessPoolExecutor
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -109,7 +111,7 @@ def fetch(cfg):
     print("Done. Now: python -m scripts.walkforward run --tf 60m   (and --tf 45m for the last ~60 days)")
 
 
-def run(cfg, tf, workers):
+def run(cfg, tf, workers, max_minutes=None):
     wf = cfg["walkforward"]
     store = Store(cfg["scan"]["store_dir"])
     ctx = load_plan()
@@ -132,9 +134,44 @@ def run(cfg, tf, workers):
     sim = W.SimCfg(wf["order_valid_sessions"], wf["hold_days"], wf["partial_at_t1"], W.cost_pct(cfg))
     print(f"{tf}: {len(intraday)} symbols with data from {first:%d %b %Y}; {bars_per_day} bars/day; "
           f"{plan.date.nunique()} scan days; round-trip cost {sim.cost_pct_round_trip:.3f}% of price")
-    occ = W.run_trades(intraday, plan, cfg, sim, bars_per_day, wf["window_bars"], workers)
-    if occ.empty:
-        print("No actionable setups in the test window.")
+    # resumable: one cached result per symbol, so the run can be split across several sessions
+    cache = OUT / f"cache_{tf}"
+    cache.mkdir(parents=True, exist_ok=True)
+    todo = [s for s in plan.symbol.unique() if s in intraday and not (cache / f"{s}.pkl").exists()]
+    print(f"{len(todo)} symbols to simulate ({len(intraday) - len(todo)} cached)")
+    deadline = time.time() + max_minutes * 60 if max_minutes else None
+    jobs = []
+    for sym in todo:
+        g = plan[plan.symbol == sym]
+        ctxd = {r["date"]: r for r in g.to_dict("records")}
+        jobs.append((sym, intraday[sym], list(ctxd), ctxd, cfg, sim, bars_per_day, wf["window_bars"]))
+    done = 0
+    with ProcessPoolExecutor(max_workers=workers) as ex:
+        futs = {}
+        it = iter(jobs)
+        for j in itertools.islice(it, workers * 2):
+            futs[ex.submit(W._symbol_trades_star, j)] = j[0]
+        while futs:
+            for f in as_completed(list(futs)):
+                sym = futs.pop(f)
+                pd.DataFrame(f.result()).to_pickle(cache / f"{sym}.pkl")
+                done += 1
+                if done % 50 == 0:
+                    print(f"  simulated {done}/{len(todo)}")
+                if deadline is None or time.time() < deadline:
+                    nxt = next(it, None)
+                    if nxt is not None:
+                        futs[ex.submit(W._symbol_trades_star, nxt)] = nxt[0]
+                break
+    left = len([s for s in plan.symbol.unique() if s in intraday and not (cache / f"{s}.pkl").exists()])
+    if left:
+        print(f"Paused with {left} symbols left. Run the same command again to continue.")
+        return
+    parts = [pd.read_pickle(p) for p in cache.glob("*.pkl")]
+    occ = pd.concat([p for p in parts if len(p)], ignore_index=True) if parts else pd.DataFrame()
+    if len(occ):
+        occ["R"] = occ["R_gross"] - occ["cost_R"].fillna(0)
+        occ = occ[occ.scan_date.isin(set(plan.date))]
     start, end = plan.date.min(), plan.date.max()
     out = OUT / f"{tf}_{start:%Y%m%d}_{end:%Y%m%d}"
     out.mkdir(parents=True, exist_ok=True)
@@ -175,6 +212,8 @@ def main():
     ap.add_argument("--start")
     ap.add_argument("--end")
     ap.add_argument("--tf", choices=["60m", "45m"], default="60m")
+    ap.add_argument("--max-minutes", type=float, help="stop starting new symbols after this long (resume later)")
+    ap.add_argument("--reset", action="store_true", help="clear the cached simulation results first")
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
     a = ap.parse_args()
     cfg = load_config()
@@ -185,7 +224,10 @@ def main():
     elif a.step == "fetch":
         fetch(cfg)
     else:
-        run(cfg, a.tf, a.workers)
+        if a.reset:
+            import shutil
+            shutil.rmtree(OUT / f"cache_{a.tf}", ignore_errors=True)
+        run(cfg, a.tf, a.workers, a.max_minutes)
 
 
 if __name__ == "__main__":

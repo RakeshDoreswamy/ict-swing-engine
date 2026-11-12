@@ -62,6 +62,15 @@ def chart(sym: str, m45: pd.DataFrame, r: dict, cfg: dict, path: Path, daily: di
     plt.close(fig)
 
 
+def tm_line(r) -> str:
+    v = getattr(r, "tm_verdict", None)
+    if not isinstance(v, str):
+        return ""
+    fill, win, avg = getattr(r, "tm_fill_pct", None), getattr(r, "tm_win_pct", None), getattr(r, "tm_avg_R_filled", None)
+    nums = (f"fill {fill:.0f} % · win {win:.0f} % · avg {avg:+.2f}R when filled · " if isinstance(avg, float) and avg == avg else "")
+    return f'<div class="muted" style="margin-top:8px;font-size:13px"><b>Time Machine:</b> {nums}{html.escape(v)}</div>'
+
+
 CSS = """:root{--bg:#fbfaf7;--panel:#fff;--ink:#1d1f23;--muted:#5f6672;--line:#e4e1da;--accent:#2357c6;--up:#1f9d6b;--dn:#d1453b;--gold:#b7791f}
 @media (prefers-color-scheme:dark){:root{--bg:#121418;--panel:#1a1d23;--ink:#e8e9ec;--muted:#9aa1ad;--line:#2b2f37;--accent:#7aa2ff;--up:#34c48b;--dn:#ff6b5e;--gold:#e0a84a}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
@@ -88,7 +97,7 @@ def write_html(out: Path, as_of, market: dict, funnel: list, finalists: pd.DataF
 <div><span>T1 · R:R</span>{fmt(r.t1)} · {fmt(r.rr_t1)}</div><div><span>T2 · R:R</span>{fmt(r.t2)} · {fmt(r.rr_t2)}</div>
 <div><span>OTE band</span>{fmt(r.ote_79)}–{fmt(r.ote_62)}</div><div><span>Last close · distance</span>{fmt(r.last_close)} · {fmt(r.dist_to_entry_atr, 1)} ATR</div>
 <div><span>Qty at 1% risk</span>{int(r.qty_1pct):,}</div><div><span>Daily</span>{html.escape(str(r.bias))}, {'discount' if r.discount else 'premium'}, {html.escape(str(r.zone))}</div></div>
-<a href="charts/{r.symbol}_45m.png"><img src="charts/{r.symbol}_45m.png" alt="{html.escape(r.symbol)} 45m chart"></a></div>""")
+{tm_line(r)}<a href="charts/{r.symbol}_45m.png"><img src="charts/{r.symbol}_45m.png" alt="{html.escape(r.symbol)} 45m chart"></a></div>""")
     near = stage3_all[~stage3_all["pass"].astype(bool)].copy() if len(stage3_all) and "pass" in stage3_all else pd.DataFrame()
     rows = "".join(f"<tr><td>{html.escape(str(r.symbol))}</td><td>{html.escape(str(r.state))}</td><td>{html.escape(str(r.reason))}</td></tr>"
                    for r in near.head(60).itertuples()) if len(near) else ""

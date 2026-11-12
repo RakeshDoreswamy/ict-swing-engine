@@ -177,66 +177,18 @@ def cost_pct(cfg) -> float:
 
 
 def simulate(bars: pd.DataFrame, start_i: int, setup: dict, sim: SimCfg, bars_per_day: int) -> dict:
-    """Simulate one limit order from bar ``start_i`` (the first bar after the scan)."""
+    """Simulate one limit order from bar ``start_i`` (the first bar after the scan).
+    The rules live in ict_engine.sim.trade.manage (shared with the Time Machine)."""
+    from ict_engine.sim.trade import manage
+
     o, h, l, c = (bars[k].to_numpy() for k in ("open", "high", "low", "close"))
-    entry, stop, t1, t2, leg_low = setup["entry"], setup["stop"], setup["t1"], setup["t2"], setup["leg_low"]
-    risk = entry - stop
-    days = bars.index.normalize()
-    start_day = days[start_i] if start_i < len(bars) else None
-    out = {"result": "no fill", "fill_time": pd.NaT, "exit_time": pd.NaT, "R_gross": np.nan, "fill": np.nan}
-    if start_day is None:
-        out["result"] = "no data after scan"
-        return out
-    uniq = pd.Index(days[start_i:]).unique()
-    last_day = uniq[min(sim.order_valid_sessions, len(uniq)) - 1]
-    fill_i, fill_px = None, None
-    for i in range(start_i, len(bars)):
-        if days[i] > last_day:
-            break
-        # a resting buy limit fills on the first touch (at the open if price gaps below it);
-        # if that same move takes the sweep low, the stop check on the fill bar handles it
-        if l[i] <= entry:
-            fill_i, fill_px = i, min(o[i], entry)
-            break
-    if fill_i is None:
-        return out
-    out["fill_time"], out["fill"] = bars.index[fill_i], fill_px
-    risk = fill_px - stop
-    if risk <= 0:
-        out["result"] = "gap below stop at fill"
-        out["R_gross"] = -1.0
-        out["exit_time"] = bars.index[fill_i]
-        return out
-    cur_stop, half_done, realised, size = stop, False, 0.0, 1.0
-    limit_i = fill_i + sim.hold_days * bars_per_day
-    for i in range(fill_i, min(len(bars), limit_i)):
-        if i > fill_i and o[i] <= cur_stop:                     # gap through the stop
-            realised += size * (o[i] - fill_px) / risk
-            out.update(result="stop (gap)" if not half_done else "T1 then BE (gap)", exit_time=bars.index[i])
-            out["R_gross"] = realised
-            return out
-        if l[i] <= cur_stop:
-            realised += size * (cur_stop - fill_px) / risk
-            out.update(result="stop" if not half_done else "T1 then breakeven", exit_time=bars.index[i])
-            out["R_gross"] = realised
-            return out
-        if not half_done and h[i] >= t1:
-            part = sim.partial_at_t1 if t2 == t2 and t2 > t1 else 1.0
-            realised += part * (t1 - fill_px) / risk
-            size -= part
-            half_done, cur_stop = True, fill_px
-            if size <= 1e-9:
-                out.update(result="T1", exit_time=bars.index[i], R_gross=realised)
-                return out
-        if half_done and t2 == t2 and h[i] >= t2:
-            realised += size * (t2 - fill_px) / risk
-            out.update(result="T1 + T2", exit_time=bars.index[i], R_gross=realised)
-            return out
-    end_i = min(len(bars), limit_i) - 1
-    realised += size * (c[end_i] - fill_px) / risk
-    still_open = limit_i > len(bars)
-    out.update(result="open at end of data" if still_open else "time stop", exit_time=bars.index[end_i], R_gross=realised)
-    return out
+    day = pd.factorize(bars.index.normalize())[0]
+    res, fi, xi, fill, R = manage(o, h, l, c, day, start_i, setup["entry"], setup["stop"], setup["t1"],
+                                  setup["t2"], sim.order_valid_sessions, sim.hold_days * bars_per_day,
+                                  sim.partial_at_t1)
+    return {"result": res, "fill": fill, "R_gross": R,
+            "fill_time": bars.index[fi] if fi >= 0 else pd.NaT,
+            "exit_time": bars.index[xi] if xi >= 0 else pd.NaT}
 
 
 def symbol_trades(sym: str, bars: pd.DataFrame, scan_days: list, ctx_by_day: dict, cfg, sim: SimCfg,
